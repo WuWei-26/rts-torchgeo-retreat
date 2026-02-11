@@ -25,7 +25,7 @@ from torchgeo.datasets import (
     stack_samples,
 )
 from torchgeo.samplers import Units
-from rtree.index import Index, Property
+
 # import torchvision
 from torchvision import transforms
 
@@ -312,14 +312,12 @@ class LandsatDataModule(pl.LightningDataModule):
         res: Optional[float] = 30,
         use_l7: bool = False,
         retreat_dir: Optional[str] = None,
-        exclude_patterns: Optional[List[str]] = None,  # exclude test files for training
     ) -> None:
         super().__init__()
         self.img_dir = img_dir
         self.batch_size = batch_size
         self.patch_size = patch_size
         self.retreat_dir = retreat_dir
-        self.exclude_patterns = exclude_patterns or ["/test/", "/Test/", "/TEST/"]
 
         if band_num == 3:
             self.landsat_bands_l89 = ["SR_B4", "SR_B3", "SR_B2"]
@@ -334,11 +332,9 @@ class LandsatDataModule(pl.LightningDataModule):
             raise ValueError(f"Unsupported band_num={band_num}")
 
         self.ds_l89 = Landsat8SR(root=img_dir, crs=crs, bands=self.landsat_bands_l89, res=res, cache=False)
-        self._filter_index_exclude_patterns(self.ds_l89) # filter test
 
         if use_l7:
             self.ds_l57 = Landsat57SR(root=img_dir, crs=crs, bands=self.landsat_bands_l57, res=res, cache=False)
-            self._filter_index_exclude_patterns(self.ds_l57)  # filter test
             # 供 RTSTemporalPairDataset 用于空间/时间索引
             self.img_dataset = UnionDataset(self.ds_l89, self.ds_l57)
             stats_ds = self.ds_l89  # 归一化与 RGB 索引统一用 L8/9 的统计
@@ -431,38 +427,6 @@ class LandsatDataModule(pl.LightningDataModule):
 
     def prepare_data(self):
         pass
-
-    def _filter_index_exclude_patterns(self, dataset) -> None:
-        # 获取原索引的所有条目
-        old_bounds = dataset.index.bounds
-        items_to_keep = []
-        excluded_count = 0
-        
-        for item in dataset.index.intersection(old_bounds, objects=True):
-            filepath = item.object
-            should_exclude = False
-            
-            for pattern in self.exclude_patterns:
-                if pattern in filepath:
-                    should_exclude = True
-                    break
-            
-            if should_exclude:
-                excluded_count += 1
-            else:
-                items_to_keep.append((item.id, item.bbox, item.object))
-        
-        if excluded_count > 0:
-            # 重建索引
-            props = Property()
-            props.dimension = 3  # torchgeo 使用 3D 索引 (x, y, t)
-            new_index = Index(interleaved=False, properties=props)
-            
-            for item_id, bbox, obj in items_to_keep:
-                new_index.insert(item_id, bbox, obj)
-            
-            dataset.index = new_index
-            print(f"[DataModule] 从 {type(dataset).__name__} 索引中排除了 {excluded_count} 个文件 (patterns: {self.exclude_patterns})")
 
     def setup(self, stage=None):
         # Assign train/val datasets for use in dataloaders
@@ -637,10 +601,10 @@ class LandsatDataModule(pl.LightningDataModule):
         except Exception:
             batch_vis = batch_aug
 
-        img_t = batch_vis["image_t"]      # [B, C, H, W]
+        img_t   = batch_vis["image_t"]      # [B, C, H, W]
         img_tm1 = batch_vis["image_tm1"]    # [B, C, H, W]
         heatmap = batch_vis["heatmap"]      # [B, 1, H, W]
-        seg = batch_vis["mask"]         # [B, 1, H, W]
+        seg     = batch_vis["mask"]         # [B, 1, H, W]
         retreat = batch_vis["retreat_map"]  # [B, 1, H, W]
         dem_t_bf = batch.get("dem_t", None)
 
@@ -663,7 +627,7 @@ class LandsatDataModule(pl.LightningDataModule):
 
         for i in range(N):
             hm_i = heatmap[i] if heatmap.ndim==4 else heatmap[i:i+1]
-            sg_i = seg[i] if seg.ndim==4 else seg[i:i+1]
+            sg_i = seg[i]     if seg.ndim==4     else seg[i:i+1]
             rt_i = retreat[i] if retreat.ndim==4 else retreat[i:i+1]
             print(f"[{i}] nz(heatmap)={_nz(hm_i)} nz(seg)={_nz(sg_i)} nz(retreat)={_nz(rt_i)}")
 
@@ -761,9 +725,24 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
         else:
             raise ValueError(f"Unsupported band_num={band_num}")
         
+        # 🔧 关键修改：支持多年份数据集
         self.img_dataset = self._create_multi_year_dataset(
             img_dir, [year_t, year_tm1], bands_l89, bands_l57, crs, res, use_l7
         )
+
+        # ds_l89 = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
+        # if use_l7:
+        #     ds_l57 = TestLandsat57SR(root=img_dir, crs=crs, bands=bands_l57, res=res, cache=False)
+        #     self.img_dataset = UnionDataset(ds_l89, ds_l57)
+        #     stats_ds = ds_l89
+        # else:
+        #     self.img_dataset = ds_l89
+        #     stats_ds = ds_l89
+
+        # ✅ 只创建一个用于获取统计信息的数据集，不覆盖 self.img_dataset
+        # stats_ds = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
+
+        # ✅ 仅用于获取统计信息（均值/标准差），不覆盖 self.img_dataset
         try:
             stats_ds = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
         except Exception:
@@ -793,6 +772,9 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             self.dem_dataset = None
             ds_for_pair = self.img_dataset  # 仅影像
 
+        # 成对推理数据集：只读影像与 DEM，不读标签
+        # 复用训练版的成对数据集 RTSTemporalPairDataset 也可，但推理时通常不需要 heatmap/mask/retreat_map
+        # 这里直接用训练版 RTSTemporalPairDataset，只取 image_t/image_tm1/dem_t/dem_tm1 键（Transforms 成对预处理）
         self.dataset = RTSTemporalPairDataset(
             img_ds=self.img_dataset,       # 用原影像数据集（TestLandsat* 支持 path）
             mask_ds=None,                  # 推理不需要标签；RTSTemporalPairDataset需改为允许 None（或用你前面提供的 PairTemporalDataset）
@@ -813,6 +795,17 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             }
         }
         year_dict = {"year": [self.year_t], "weight": [1.0], "roi": [roi_dict[str(self.year_t)]]}
+
+        # self.predict_sampler = RandomGeoSamplerMultiRoiMultiYear(
+        #     self.dataset,
+        #     size=self.patch_size,
+        #     stride=self.patch_size,
+        #     length=200, # self.patch_size
+        #     year_dict=year_dict,
+        #     units=Units.PIXELS,
+        #     pair=True,        # 关键：返回 {'bbox','year_t','year_tm1'}
+        #     prev_delta=self.year_t - self.year_tm1 if (self.year_t - self.year_tm1) > 0 else 1,
+        # )
 
         self.predict_sampler = TestPreChippedGeoSampler(
             self.dataset, 
@@ -958,3 +951,27 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             batch_size=1,  # ✅ 强制 batch_size=1，每个影像单独处理
             collate_fn=collate_single_sample,
         )
+    
+    # def predict_dataloader(self):
+    #     def collate_and_filter(batch):
+    #         # 用 torchgeo 的 stack_samples 做默认聚合
+    #         batch = stack_samples(batch)
+    #         # 只保留张量字段
+    #         keep = ["image_t", "image_tm1", "dem_t", "dem_tm1", "bbox", "path", "crs", "image"]
+    #         batch_filtered={}
+
+    #         for k in keep:
+    #             if k in batch:
+    #                 batch_filtered[k] = batch[k]
+            
+    #         return batch_filtered
+    #         # batch_tensors = {k: v for k, v in batch.items() if k in keep and torch.is_tensor(v)}
+    #         # return batch_tensors
+
+    #     return DataLoader(
+    #         self.dataset,
+    #         sampler=self.predict_sampler,
+    #         num_workers=self.num_workers,
+    #         batch_size=self.batch_size,
+    #         collate_fn=collate_and_filter,
+    #     )

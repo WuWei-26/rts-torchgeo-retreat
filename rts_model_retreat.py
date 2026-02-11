@@ -143,7 +143,7 @@ def resnet50_encoder(
 
     new_weight = new_weight * (weights_in_channels / new_in_channels)
     # else:
-    #     raise Exception("Channels not match")
+    #     raise Exception("Sorry, channels not match")
     # print(new_weight.shape)
 
     # print(weights_in_channels / new_in_channels)
@@ -155,6 +155,10 @@ def resnet50_encoder(
 # ========= 1) 逐尺度特征融合模块 =========
 class FeatureFusionPerScale(nn.Module):
     def __init__(self, in_ch_list, out_ch_list):
+        """
+        in_ch_list: List[int], 每个尺度融合后输入通道数（cat 后的通道）
+        out_ch_list: List[int], 解码器期望的每尺度通道数（与 encoder.out_channels 对齐）
+        """
         super().__init__()
         assert len(in_ch_list) == len(out_ch_list)
         self.blocks = nn.ModuleList([
@@ -259,8 +263,8 @@ class SiameseRTS(pl.LightningModule):
 
         # task-level weights
         self.task_weight_seg = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.task_weight_heat = nn.Parameter(torch.tensor(2.0), requires_grad=False) # 2.0
-        self.task_weight_ret = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
+        self.task_weight_heat = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
+        self.task_weight_ret = nn.Parameter(torch.tensor(3.0), requires_grad=False) # 2.0
 
         self.lr = nn.Parameter(torch.tensor(5e-4), requires_grad=False)
         self.encode_lr_mult = nn.Parameter(torch.tensor(encode_lr_mult), requires_grad=False)
@@ -329,19 +333,8 @@ class SiameseRTS(pl.LightningModule):
     def forward(self, image_t, image_tm1, dem_t=None, dem_tm1=None):
         # 拼接 DEM/TPI 通道（标准化 TPI 已在前处理或 batch 中）
         if dem_t is not None and self.use_dem:
-            # 对齐空间尺寸
-            if dem_t.shape[-2:] != image_t.shape[-2:]:
-                min_h = min(dem_t.shape[-2], image_t.shape[-2])
-                min_w = min(dem_t.shape[-1], image_t.shape[-1])
-                image_t = image_t[..., :min_h, :min_w]
-                dem_t = dem_t[..., :min_h, :min_w]
             image_t = torch.cat([image_t, dem_t], dim=1)
         if dem_tm1 is not None and self.use_dem:
-            if dem_tm1.shape[-2:] != image_tm1.shape[-2:]:
-                min_h = min(dem_tm1.shape[-2], image_tm1.shape[-2])
-                min_w = min(dem_tm1.shape[-1], image_tm1.shape[-1])
-                image_tm1 = image_tm1[..., :min_h, :min_w]
-                dem_tm1 = dem_tm1[..., :min_h, :min_w]
             image_tm1 = torch.cat([image_tm1, dem_tm1], dim=1)
 
         # 共享编码器提取特征
@@ -651,6 +644,12 @@ class SiameseRTS(pl.LightningModule):
         return info
     
     def predict_step(self, batch, batch_idx, dataloader_idx: int = 0):
+        """
+        双时相预测：
+        输入 batch: {'image_t','image_tm1','dem_t','dem_tm1',...}
+        输出: dict，包含年 t/t-1 的影像和预测的 retreat/heatmap/mask 概率。
+        """
+
         image_t = batch["image_t"]
         image_tm1 = batch["image_tm1"]
         dem_t = batch.get("dem_t", None)

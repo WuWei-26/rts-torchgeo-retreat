@@ -102,8 +102,10 @@ class Landsat8SR(RasterDataset):
         
         for item in self.index.intersection(self.index.bounds, objects=True):
             filepath = item.object
+
             dir_year = self._extract_dir_year(filepath)
-            
+            if '/test/' in filepath:
+                continue  # exclude test data
             if dir_year is None:
                 # 无法提取年份，保留原有边界
                 new_index.insert(item.id, item.bounds, filepath)
@@ -174,13 +176,10 @@ class Landsat8SR(RasterDataset):
                 f"Query bbox: {bbox}, Available years: {available_years}"
             )
 
-
+        # 打开 VRT
         src = self._cached_load_warp_file(filepath) if self.cache else self._load_warp_file(filepath)
-        
-        # window = src.window(*bbox)
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
 
+        # 计算窗口尺寸
         if isinstance(self.res, (int, float)):
             res_x = res_y = float(self.res)
         else:
@@ -198,11 +197,10 @@ class Landsat8SR(RasterDataset):
                 raise IndexError(f"Requested band indexes {bad} out of range 1..{max_band}")
 
         count = len(band_indexes) if band_indexes else src.count
-        # out_shape = (count, out_height, out_width)
-        out_shape = (count, int(window.height), int(window.width))
+        out_shape = (count, out_height, out_width)
 
         dest = src.read(indexes=band_indexes, out_shape=out_shape, 
-                       window=window)
+                       window=from_bounds(*bounds, src.transform))
 
         # dtype 兼容
         if dest.dtype == np.uint16:
@@ -211,7 +209,7 @@ class Landsat8SR(RasterDataset):
             dest = dest.astype(np.int64)
 
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "path": filepath, "transform": transform}
+        sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
         
         if self.is_image:
             sample["image"] = tensor.float()
@@ -221,6 +219,87 @@ class Landsat8SR(RasterDataset):
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
+
+    # def __getitem__(self, query):
+    #     # 解析输入
+    #     if isinstance(query, dict):
+    #         bbox: BoundingBox = query["bbox"]
+    #         year = query.get("year", None)     # 严格年份（"%Y" 或 "%Y%m%d"）
+    #         path = query.get("path", None)     # 指定文件路径（可选）
+    #     elif isinstance(query, BoundingBox):
+    #         bbox, year, path = query, None, None
+    #     else:
+    #         raise TypeError(f"Unsupported query type: {type(query)}")
+
+    #     sample = super().__getitem__(bbox)
+
+    #     # 用 bbox 命中索引
+    #     hits = self.index.intersection(tuple(bbox), objects=True)
+    #     filepaths = [hit.object for hit in hits]
+    #     sample["path"] = filepaths[0] if filepaths else ""
+
+    #     # 二次按 year 过滤（正则需捕获 (?P<date>...)，与 date_format 一致）
+    #     if year is not None:
+    #         rgx = re.compile(self.filename_regex, re.VERBOSE)
+    #         year_str = str(int(year))
+    #         keep = []
+    #         for fp in filepaths:
+    #             m = rgx.match(os.path.basename(fp))
+    #             if m and "date" in m.groupdict() and m.group("date") == year_str:
+    #                 keep.append(fp)
+    #         filepaths = keep
+
+    #     if not filepaths:
+    #         raise IndexError(f"bbox: {bbox} (year={year}) not found in index bounds: {self.bounds}")
+
+    #     # 确认最终文件（支持传入 path）
+    #     if path is not None:
+    #         if path not in filepaths:
+    #             raise IndexError(f"path {path} not matched for bbox: {bbox}")
+    #         filepath = path
+    #     else:
+    #         filepath = filepaths[0]
+
+    #     # 打开 VRT
+    #     src = self._cached_load_warp_file(filepath) if self.cache else self._load_warp_file(filepath)
+
+    #     # 计算窗口尺寸（兼容标量/二元组 res）
+    #     if isinstance(self.res, (int, float)):
+    #         res_x = res_y = float(self.res)
+    #     else:
+    #         res_x, res_y = self.res
+    #     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+    #     out_width  = math.ceil((bbox.maxx - bbox.minx) / res_x)
+    #     out_height = math.ceil((bbox.maxy - bbox.miny) / res_y)
+
+    #     # 波段索引检查
+    #     band_indexes = self.band_indexes
+    #     if band_indexes is not None:
+    #         max_band = src.count
+    #         bad = [i for i in band_indexes if i < 1 or i > max_band]
+    #         if bad:
+    #             raise IndexError(f"Requested band indexes {bad} out of range 1..{max_band} for {os.path.basename(filepath)}")
+
+    #     count = len(band_indexes) if band_indexes else src.count
+    #     out_shape = (count, out_height, out_width)
+
+    #     dest = src.read(indexes=band_indexes, out_shape=out_shape, window=from_bounds(*bounds, src.transform))
+
+    #     # dtype 兼容
+    #     if dest.dtype == np.uint16:
+    #         dest = dest.astype(np.int32)
+    #     elif dest.dtype == np.uint32:
+    #         dest = dest.astype(np.int64)
+
+    #     tensor = torch.tensor(dest)
+    #     sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
+    #     if self.is_image:
+    #         sample["image"] = tensor.float()
+    #     else:
+    #         sample["mask"] = tensor
+    #     if self.transforms is not None:
+    #         sample = self.transforms(sample)
+    #     return sample
 
     def _pick_file(
         self,
@@ -262,19 +341,21 @@ class Landsat8SR(RasterDataset):
         count = len(band_indexes) if band_indexes else src.count
         out_shape = (count, out_height, out_width)
         
+        # dest = src.read(
+        #     indexes=band_indexes,
+        #     out_shape=out_shape,
+        #     window=from_bounds(*bounds, src.transform),
+        # )
+
+        # 删除 boundless 参数（WarpedVRT 不支持），改用 try-except
         try:
-            window = src.window(*query)
-            transform = src.window_transform(window)
-            count = len(band_indexes) if band_indexes else src.count
-            out_shape = (count, int(window.height), int(window.width))
             dest = src.read(
                 indexes=band_indexes,
                 out_shape=out_shape,
-                window=window,
+                window=from_bounds(*bounds, src.transform),
             )
         except Exception:  # 捕获边界错误
-            out_shape = (count, int(window.height), int(window.width)) if 'window' in locals() else (count, 1, 1)
-            dest = np.zeros(out_shape, dtype=np.float32)
+            dest = np.zeros(out_shape, dtype=np.float32)  # 返回零数组
 
         # fix numpy dtypes which are not supported by pytorch tensors
         if dest.dtype == np.uint16:
@@ -289,6 +370,11 @@ class Landsat8SR(RasterDataset):
         check_rgb = all(item in self.bands for item in self.rgb_bands)
         if not check_rgb:
             raise Exception("Need R G B bands to visualize")
+
+        # Find the correct bands
+        # rgb_indices = []
+        # for band in self.rgb_bands:
+        #     rgb_indices.append(self.bands.index(band))
 
         # Reorder and rescale the image
         if sample["image"].ndim == 4:
@@ -433,11 +519,6 @@ class RtsMask(Landsat8SR):
         ref = self._pick_file([filepaths[0]], bbox)
         H, W = ref.shape[-2], ref.shape[-1]
 
-        import rasterio
-        src = self._cached_load_warp_file(filepaths[0]) if self.cache else self._load_warp_file(filepaths[0])
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
-
         data_list: List[Tensor] = []
         # 为每个目标 band 选择对应文件；缺则零填
         for band in self.bands:
@@ -466,7 +547,7 @@ class RtsMask(Landsat8SR):
             nz = lambda t: int((t > 0).sum().item())
             print(f"  output shape={tuple(data.shape)}, nz heat/seg/ret=({nz(data[0])}, {nz(data[1])}, {nz(data[2])})")
 
-        sample = {"crs": self.crs, "bbox": bbox, "mask": data, "transform": transform}
+        sample = {"crs": self.crs, "bbox": bbox, "mask": data}
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
@@ -530,13 +611,14 @@ class RetreatMapDataset(RasterDataset):
             res_x = res_y = float(self.res)
 
         bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+        # out_width = math.ceil((bbox.maxx - bbox.minx) / self.res)
+        # out_height = math.ceil((bbox.maxy - bbox.miny) / self.res)
         out_width = math.ceil((bbox.maxx - bbox.minx) / res_x)
         out_height = math.ceil((bbox.maxy - bbox.miny) / res_y)
+        
         out_shape = (src.count, out_height, out_width)
 
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
-        dest = src.read(out_shape=out_shape, window=window)
+        dest = src.read(out_shape=out_shape, window=from_bounds(*bounds, src.transform))
 
         if dest.dtype == np.uint16:
             dest = dest.astype(np.int32)
@@ -544,7 +626,7 @@ class RetreatMapDataset(RasterDataset):
             dest = dest.astype(np.int64)
 
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor, "path": filepath, "transform": transform}
+        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor, "path": filepath}
 
         if self.transforms is not None:
             sample = self.transforms(sample)
@@ -554,6 +636,16 @@ class RetreatMapDataset(RasterDataset):
     # - RasterDataset 会用 self.crs/self.res 构造 WarpedVRT，在读窗口时重投影匹配目标网格
 
 class RTSTemporalPairDataset(torch.utils.data.Dataset):
+    """
+    将同一 bbox 的两个年份样本打包为一条样本：
+    返回键：
+      image_t, image_tm1, dem_t, dem_tm1, mask, heatmap, retreat_map
+    依赖：
+      - img_ds: Landsat8SR/Landsat57SR 等（is_image=True）
+      - mask_ds: RtsMask（含 heatmap/segment/retreat 三个 band）
+      - dem_ds:  MeanTPI（返回标准化 TPI 的多尺度均值）
+    """
+
     @staticmethod
     def _year_bbox(bbox: BoundingBox, year: int) -> BoundingBox:
         # 改为严格年份窗口 [year-01-01, (year+1)-01-01)
@@ -607,6 +699,18 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         bbox_t = self._year_bbox(bbox, year_t)
         bbox_tm1 = self._year_bbox(bbox, year_tm1)
 
+        # q_t = self._year_bbox(bbox, year_t)
+        # q_tm1 = self._year_bbox(bbox, year_tm1)
+
+        # q_t = {"bbox": bbox_t, "year": year_t}
+        # q_tm1 = {"bbox": bbox_tm1, "year": year_tm1}
+
+        # 确保 q_t / q_tm1 都是 BoundingBox
+        # if not isinstance(q_t, BoundingBox):
+        #     q_t = BoundingBox(*q_t)
+        # if not isinstance(q_tm1, BoundingBox):
+        #     q_tm1 = BoundingBox(*q_tm1)
+
         # 年 t 图像
         s_img_t = self.img_ds[bbox_t]
 
@@ -616,6 +720,13 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         except Exception:
             print(f"[WARNING] lack year_tm1={year_tm1} image, using year_t={year_t}")
             s_img_tm1 = self.img_ds[bbox_t]
+
+        # # DEM
+        # s_dem_t = self.dem_ds[q_t]
+        # try:
+        #     s_dem_tm1 = self.dem_ds[q_tm1]
+        # except Exception:
+        #     s_dem_tm1 = self.dem_ds[q_t]
 
         # DEM（允许 dem_ds 也为 None）
         if self.dem_ds is not None:
@@ -647,6 +758,42 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
             sample["dem_t"] = s_dem_t["mask"].float()
             sample["dem_tm1"] = s_dem_tm1["mask"].float()
 
+        # # mask
+        # s_mask_t = self.mask_ds[q_t]
+        # labels = s_mask_t["mask"].float()
+        # H, W = labels.shape[-2], labels.shape[-1]
+        # heatmap = labels[0:1,...]
+        # mask = labels[1:2,...]
+
+        # # retreat
+        # if self.retreat_ds is not None:
+        #     try:
+        #         s_ret = self.retreat_ds[q_t]
+        #         if s_ret["mask"].ndim == 3:
+        #             retreat = s_ret["mask"][:1,...].float()
+        #         else:
+        #             retreat = s_ret["mask"].unsqueeze(0).float()
+        #     except Exception:
+        #         retreat = torch.zeros((1, H, W), dtype=labels.dtype, device=labels.device)
+        # else:
+        #     retreat = torch.zeros((1, H, W), dtype=labels.dtype, device=labels.device)
+
+        # sample = {
+        #     "image_t": s_img_t["image"].float(),
+        #     "image_tm1": s_img_tm1["image"].float(),
+        #     "dem_t": s_dem_t["mask"].float(),
+        #     "dem_tm1": s_dem_tm1["mask"].float(),
+        #     "heatmap": heatmap,
+        #     "mask": mask,
+        #     "retreat_map": retreat,
+        #     "bbox": bbox,
+        #     "crs": self.crs,
+        #     "path_t": s_img_t.get("path", None),
+        #     "path_tm1": s_img_tm1.get("path", None),
+        #     "year_t": year_t,
+        #     "year_tm1": year_tm1,
+        # }
+
         # ------ 训练阶段：仅当 mask_ds 非 None 时才补标签 ------
         if self.mask_ds is not None:
             # q_mask_t = {"bbox": bbox_t, "year": year_t}
@@ -662,7 +809,7 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
             if self.retreat_ds is not None:
                 try:
                     # q_ret_t = {"bbox": bbox_t, "year": year_t}
-                    s_ret = self.retreat_ds[bbox_t]
+                    s_ret = self.retreat_ds[{"bbox": bbox_t, "year": year_t}]
                     if s_ret["mask"].ndim == 3:
                         retreat = s_ret["mask"][:1,...].float()
                     else:
@@ -751,12 +898,9 @@ class MeanTPI(RasterDataset):
         band_indexes = self.band_indexes
         count = len(band_indexes) if band_indexes else src.count
         out_shape = (count, out_height, out_width)
-
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
         
         dest = src.read(indexes=band_indexes, out_shape=out_shape,
-                       window=window)
+                       window=from_bounds(*bounds, src.transform))
         
         if dest.dtype == np.uint16:
             dest = dest.astype(np.int32)
@@ -764,8 +908,7 @@ class MeanTPI(RasterDataset):
             dest = dest.astype(np.int64)
         
         tensor = torch.tensor(dest)
-        # sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath}
-        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath, "transform": transform}
+        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath}
         
         if self.transforms is not None:
             sample = self.transforms(sample)
@@ -790,7 +933,7 @@ class TestLandsat8SR(Landsat8SR):
     # filename_regex = r"^S2.{5}_(?P<date>\d{8})_N\d{4}_R\d{3}_6Bands_S\d{1}"
     # filename_regex = r"^LANDSAT_LC08_C02_T1_L2_LC08_\d{6}_(?P<date>\d{4}).+"
     # filename_regex = L89_REGEX
-    date_format = "%Y"
+    # date_format = "%Y"
     is_image = True
     separate_files = False
     all_bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
@@ -834,22 +977,70 @@ class TestLandsat8SR(Landsat8SR):
             raise NotImplementedError(
                 "Testing for separated files are not supported yet"
             )
-        RasterDataset.__init__(self, root, crs, res, bands, transforms, cache) # inherit from RasterDataset directly
-        # super().__init__(root, crs, res, bands, transforms, cache)
+        super().__init__(root, crs, res, bands, transforms, cache)
 
-        # 初始化 band_indexes
-        if not hasattr(self, "band_indexes"):
-            if bands is None:
-                self.band_indexes = list(range(1, len(self.all_bands) + 1))
-            else:
-                self.band_indexes = [self.all_bands.index(band) + 1 for band in bands]
-        
-        self.bands_mean = self.all_bands_mean[np.array(self.band_indexes) - 1]
-        self.bands_std = self.all_bands_std[np.array(self.band_indexes) - 1]
-        self.rgb_indexes = [self.bands.index(band) for band in self.rgb_bands]
-        
-        # ✅ 对推理数据集也用目录年份重建索引
-        self._reindex_by_directory_year()
+    # def __getitem__(self, query: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Retrieve image/mask and metadata indexed by query.
+
+    #     Args:
+    #         query: (minx, maxx, miny, maxy, mint, maxt) coordinates to index
+
+    #     Returns:
+    #         sample of image/mask and metadata at that index
+
+    #     Raises:
+    #         IndexError: if query is not found in the index
+    #     """
+    #     bbox: BoundingBox = query["bbox"]
+    #     filepath = query["path"]
+
+    #     hits = self.index.intersection(tuple(bbox), objects=True)
+    #     filepaths = cast(List[str], [hit.object for hit in hits])
+
+    #     if filepath not in filepaths:
+    #         raise IndexError(
+    #             f"query: {bbox} not found in index with bounds: {self.bounds}"
+    #         )
+
+    #     if self.cache:
+    #         vrt_fh = self._cached_load_warp_file(filepath)
+    #     else:
+    #         vrt_fh = self._load_warp_file(filepath)
+
+    #     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+    #     band_indexes = self.band_indexes
+
+    #     src = vrt_fh
+    #     out_width = round((bbox.maxx - bbox.minx) / self.res[0])
+    #     out_height = round((bbox.maxy - bbox.miny) / self.res[1])
+    #     # out_width = math.ceil((bbox.maxx - bbox.minx) / self.res)
+    #     # out_height = math.ceil((bbox.maxy - bbox.miny) / self.res)
+    #     count = len(band_indexes) if band_indexes else src.count
+    #     out_shape = (count, out_height, out_width)
+    #     dest = src.read(
+    #         indexes=band_indexes,
+    #         out_shape=out_shape,
+    #         window=from_bounds(*bounds, src.transform),
+    #     )
+
+    #     # fix numpy dtypes which are not supported by pytorch tensors
+    #     if dest.dtype == np.uint16:
+    #         dest = dest.astype(np.int32)
+    #     elif dest.dtype == np.uint32:
+    #         dest = dest.astype(np.int64)
+
+    #     tensor = torch.tensor(dest)  # .float()
+
+    #     sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
+    #     if self.is_image:
+    #         sample["image"] = tensor.float()
+    #     else:
+    #         sample["mask"] = tensor  # .float() #long() # modified zyzhao
+
+    #     if self.transforms is not None:
+    #         sample = self.transforms(sample)
+
+    #     return sample
 
     def __getitem__(self, query):
 
@@ -866,6 +1057,23 @@ class TestLandsat8SR(Landsat8SR):
         hits = self.index.intersection(tuple(bbox), objects=True)
         filepaths = cast(List[str], [hit.object for hit in hits])
         #  filepaths = [hit.object for hit in hits]
+
+        # 自动补齐或校验 path
+        # if filepath is None:
+        #     if not filepaths:
+        #         raise IndexError(f"query: {bbox} not found in index with bounds: {self.bounds}")
+        #     filepath = filepaths[0]
+        # else:
+        #     if filepath not in filepaths:
+        #         raise IndexError(f"query: {bbox} not found in index with bounds: {self.bounds}")
+
+        # 二次按 year 过滤（严格匹配 regex 中的 date）
+        # if year is not None:
+        #     rgx = re.compile(self.filename_regex, re.VERBOSE)
+        #     filepaths = [
+        #         fp for fp in filepaths
+        #         if (m := rgx.match(os.path.basename(fp))) and m.groupdict().get("date") == str(year)
+        #     ]
 
         if not filepaths:
             raise IndexError(f"bbox: {bbox} not found in index bounds: {self.bounds}")
@@ -891,15 +1099,12 @@ class TestLandsat8SR(Landsat8SR):
                 raise IndexError(f"Requested band indexes {bad} out of range 1..{max_band} for {os.path.basename(filepath)}")
 
         count = len(band_indexes) if band_indexes else src.count
-        # out_shape = (count, out_height, out_width)
-
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
+        out_shape = (count, out_height, out_width)
 
         dest = src.read(
             indexes=band_indexes,  # 若为 None，rasterio 会读所有通道
-            out_shape=(count, int(window.height), int(window.width)),
-            window=window,
+            out_shape=out_shape,
+            window=from_bounds(*bounds, src.transform),
         )
 
         # dtype 兼容
@@ -909,7 +1114,7 @@ class TestLandsat8SR(Landsat8SR):
             dest = dest.astype(np.int64)
 
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "path": filepath, "transform": transform}
+        sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
         if self.is_image:
             sample["image"] = tensor.float()
         else:
@@ -943,7 +1148,7 @@ class TestLandsat57SR(TestLandsat8SR):
     filename_glob = "LANDSAT_L*.tif"
     filename_regex = r"^LANDSAT_(?:LT05|LE07|LT05_LE07)_C02_T1_L2_(?:LT05|LE07|LT05_LE07)_\d{6}_(?P<date>\d{4})\d{4}.*\.tif$"
     # filename_regex = L57_REGEX
-    date_format = "%Y"
+    date_format = "%Y"  # only acquire year information
     is_image = True
     separate_files = False
     all_bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"]
@@ -957,29 +1162,6 @@ class TestLandsat57SR(TestLandsat8SR):
         dtype=torch.float32,
     )
 
-    def __init__(
-        self,
-        root: str = "data",
-        crs: Optional[CRS] = None,
-        res: Optional[float] = None,
-        bands: Optional[Sequence[str]] = None,
-        transforms: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-        cache: bool = True,
-    ) -> None:
-        RasterDataset.__init__(self, root, crs, res, bands, transforms, cache) # inherit from RasterDataset directly
-        
-        if not hasattr(self, "band_indexes"):
-            if bands is None:
-                self.band_indexes = list(range(1, len(self.all_bands) + 1))
-            else:
-                self.band_indexes = [self.all_bands.index(band) + 1 for band in bands]
-        
-        self.bands_mean = self.all_bands_mean[np.array(self.band_indexes) - 1]
-        self.bands_std = self.all_bands_std[np.array(self.band_indexes) - 1]
-        self.rgb_indexes = [self.bands.index(band) for band in self.rgb_bands]
-        
-        self._reindex_by_directory_year()
-
 
 # TODO: merge dem tiles
 class TestMeanTPI(MeanTPI):
@@ -991,6 +1173,70 @@ class TestMeanTPI(MeanTPI):
     # is_dem = False
     separate_files = False
     all_bands = ["mean_tpi"]
+
+    # def __getitem__(self, query: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Retrieve image/mask and metadata indexed by query.
+
+    #     Args:
+    #         query: (minx, maxx, miny, maxy, mint, maxt) coordinates to index
+
+    #     Returns:
+    #         sample of image/mask and metadata at that index
+
+    #     Raises:
+    #         IndexError: if query is not found in the index
+    #     """
+    #     bbox: BoundingBox = query["bbox"]
+    #     # filepath = query['path']
+
+    #     hits = self.index.intersection(tuple(bbox), objects=True)
+    #     filepaths = cast(List[str], [hit.object for hit in hits])
+
+    #     if not filepaths:
+    #         raise IndexError(
+    #             f"query: {bbox} not found in index with bounds: {self.bounds}"
+    #         )
+
+    #     filepath = filepaths[0]
+    #     if self.cache:
+    #         vrt_fh = self._cached_load_warp_file(filepath)
+    #     else:
+    #         vrt_fh = self._load_warp_file(filepath)
+
+    #     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+    #     band_indexes = self.band_indexes
+
+    #     src = vrt_fh
+    #     out_width = round((bbox.maxx - bbox.minx) / self.res[0])
+    #     out_height = round((bbox.maxy - bbox.miny) / self.res[1])
+    #     # out_width = math.ceil((bbox.maxx - bbox.minx) / self.res)
+    #     # out_height = math.ceil((bbox.maxy - bbox.miny) / self.res)
+    #     count = len(band_indexes) if band_indexes else src.count
+    #     out_shape = (count, out_height, out_width)
+    #     dest = src.read(
+    #         indexes=band_indexes,
+    #         out_shape=out_shape,
+    #         window=from_bounds(*bounds, src.transform),
+    #     )
+
+    #     # fix numpy dtypes which are not supported by pytorch tensors
+    #     if dest.dtype == np.uint16:
+    #         dest = dest.astype(np.int32)
+    #     elif dest.dtype == np.uint32:
+    #         dest = dest.astype(np.int64)
+
+    #     tensor = torch.tensor(dest)  # .float()
+
+    #     sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
+    #     if self.is_image:
+    #         sample["image"] = tensor.float()
+    #     else:
+    #         sample["mask"] = tensor  # .float() #long() # modified zyzhao
+
+    #     if self.transforms is not None:
+    #         sample = self.transforms(sample)
+
+    #     return sample
 
     def __getitem__(self, query):
         # 兼容两种输入
@@ -1017,13 +1263,10 @@ class TestMeanTPI(MeanTPI):
         count = len(band_indexes) if band_indexes else src.count
         out_shape = (count, out_height, out_width)
 
-        window = src.window(bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-        transform = src.window_transform(window)
-
         dest = src.read(
             indexes=band_indexes,
             out_shape=out_shape,
-            window=window,
+            window=from_bounds(*bounds, src.transform),
         )
 
         if dest.dtype == np.uint16:
@@ -1032,9 +1275,7 @@ class TestMeanTPI(MeanTPI):
             dest = dest.astype(np.int64)
 
         tensor = torch.tensor(dest)
-        # sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
-        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath, "transform": transform}
-
+        sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
         if self.is_image:
             sample["image"] = tensor.float()
         else:
@@ -1056,6 +1297,34 @@ class TestIntersectionDEM(IntersectionDataset):
                 box2 = BoundingBox(*hit2.bounds)  # type: ignore
                 self.index.insert(i, tuple(box1 & box2), hit1.object)
                 i += 1
+
+    # def __getitem__(self, query: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Retrieve image and metadata indexed by query.
+
+    #     Args:
+    #         query: (minx, maxx, miny, maxy, mint, maxt) coordinates to index
+
+    #     Returns:
+    #         sample of data/labels and metadata at that index
+
+    #     Raises:
+    #         IndexError: if query is not within bounds of the index
+    #     """
+    #     bbox = query["bbox"]
+    #     if not bbox.intersects(self.bounds):
+    #         raise IndexError(
+    #             f"query: {query} not found in index with bounds: {self.bounds}"
+    #         )
+
+    #     # All datasets are guaranteed to have a valid query
+    #     samples = [ds[query] for ds in self.datasets]  # type: ignore
+
+    #     sample = self.collate_fn(samples)
+
+    #     if self.transforms is not None:
+    #         sample = self.transforms(sample)
+
+    #     return sample
 
     def __getitem__(self, query: Dict[str, Any]) -> Dict[str, Any]:
         """
