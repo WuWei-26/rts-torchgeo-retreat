@@ -256,15 +256,15 @@ class SiameseRTS(pl.LightningModule):
         self.loss_fn_ret = LossWeightedMSE(W=20) # retreat map mse; loss origional=10
 
         self.loss_weight_dice = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.loss_weight_focal = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 20.0
+        self.loss_weight_focal = nn.Parameter(torch.tensor(10.0), requires_grad=False) # 20.0
         self.loss_weight_mse = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_area = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_retreat = nn.Parameter(torch.tensor(1.0), requires_grad=False)
 
         # task-level weights
         self.task_weight_seg = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.task_weight_heat = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
-        self.task_weight_ret = nn.Parameter(torch.tensor(3.0), requires_grad=False) # 2.0
+        self.task_weight_heat = nn.Parameter(torch.tensor(2.0), requires_grad=False) # 2.0
+        self.task_weight_ret = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
 
         self.lr = nn.Parameter(torch.tensor(5e-4), requires_grad=False)
         self.encode_lr_mult = nn.Parameter(torch.tensor(encode_lr_mult), requires_grad=False)
