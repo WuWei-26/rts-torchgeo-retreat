@@ -668,6 +668,53 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         self.year_t = year_t
         self.year_tm1 = year_tm1
 
+    def _get_image_by_year(self, bbox: BoundingBox, year: int) -> dict:
+        """
+        根据年份选择正确的子数据集获取图像。
+        - year > 2012: 优先使用 Landsat8SR
+        - year <= 2012: 优先使用 Landsat57SR
+        
+        如果 img_ds 是 UnionDataset，则遍历子数据集；
+        否则直接调用 img_ds[bbox]。
+        """
+        from torchgeo.datasets import UnionDataset
+        
+        # 如果不是 UnionDataset，直接查询
+        if not isinstance(self.img_ds, UnionDataset):
+            return self.img_ds[bbox]
+        
+        # 根据年份确定优先级
+        if year > 2012:
+            # 优先 Landsat8SR，然后 Landsat57SR
+            preferred_types = (Landsat8SR, Landsat57SR)
+        else:
+            # 优先 Landsat57SR，然后 Landsat8SR
+            preferred_types = (Landsat57SR, Landsat8SR)
+        
+        last_error = None
+        
+        # 按优先级尝试各个子数据集
+        for preferred_type in preferred_types:
+            for ds in self.img_ds.datasets:
+                if isinstance(ds, preferred_type):
+                    try:
+                        return ds[bbox]
+                    except IndexError as e:
+                        last_error = e
+                        continue
+        
+        # 如果所有优先类型都失败，尝试所有数据集
+        for ds in self.img_ds.datasets:
+            try:
+                return ds[bbox]
+            except IndexError as e:
+                last_error = e
+                continue
+        
+        # 全部失败，抛出最后一个错误
+        raise IndexError(
+            f"No image found for year {year}, bbox: {bbox}. Last error: {last_error}"
+        )
 
     def __len__(self):
         # 让外部的采样器（RandomGeoSamplerMultiRoiMultiYear）控制采样次数
@@ -712,14 +759,21 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         #     q_tm1 = BoundingBox(*q_tm1)
 
         # 年 t 图像
-        s_img_t = self.img_ds[bbox_t]
-
-        # 年 t-1 图像，若缺失则回退
+        # s_img_t = self.img_ds[bbox_t]
+        s_img_t = self._get_image_by_year(bbox_t, year_t)
+        
         try:
-            s_img_tm1 = self.img_ds[bbox_tm1]
+            s_img_tm1 = self._get_image_by_year(bbox_tm1, year_tm1)
         except Exception:
             print(f"[WARNING] lack year_tm1={year_tm1} image, using year_t={year_t}")
-            s_img_tm1 = self.img_ds[bbox_t]
+            s_img_tm1 = self._get_image_by_year(bbox_t, year_t)
+
+        # # 年 t-1 图像，若缺失则回退
+        # try:
+        #     s_img_tm1 = self.img_ds[bbox_tm1]
+        # except Exception:
+        #     print(f"[WARNING] lack year_tm1={year_tm1} image, using year_t={year_t}")
+        #     s_img_tm1 = self.img_ds[bbox_t]
 
         # # DEM
         # s_dem_t = self.dem_ds[q_t]
