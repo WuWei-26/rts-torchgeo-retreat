@@ -36,6 +36,8 @@ class Landsat8SR(RasterDataset):
     filename_glob = "LANDSAT_LC08*.tif"
     # filename_regex = L89_REGEX
     filename_regex = r".*LANDSAT_LC0[89].*\.tif$"
+    # 只匹配 geometric_median 合成影像
+    # filename_regex = r"^LANDSAT_.*geometric_median.*\.tif$"
     date_format = "%Y%m%d"
     # date_format = "%Y"  # only acquire year information
     is_image = True
@@ -117,7 +119,7 @@ class Landsat8SR(RasterDataset):
             
             # 🔧 关键修复：使用目录年份设置时间边界
             mint = datetime(dir_year, 1, 1, 0, 0, 0).timestamp()
-            maxt = datetime(dir_year, 12, 31, 23, 59, 59).timestamp()
+            maxt = datetime(dir_year+1, 1, 1, 0, 0, 0).timestamp()
             
             # 插入新边界
             new_index.insert(item.id, (minx, maxx, miny, maxy, mint, maxt), filepath)
@@ -207,6 +209,13 @@ class Landsat8SR(RasterDataset):
             dest = dest.astype(np.int32)
         elif dest.dtype == np.uint32:
             dest = dest.astype(np.int64)
+        
+        # ✅ 新增：全零检测，说明 bbox 不在该文件有效覆盖范围内
+        # if dest.sum() == 0:
+        #     raise IndexError(
+        #         f"All-zero image for year={query_year}, "
+        #         f"file={os.path.basename(filepath)}, bbox={bbox}"
+        #     )
 
         tensor = torch.tensor(dest)
         sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
@@ -219,87 +228,6 @@ class Landsat8SR(RasterDataset):
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
-
-    # def __getitem__(self, query):
-    #     # 解析输入
-    #     if isinstance(query, dict):
-    #         bbox: BoundingBox = query["bbox"]
-    #         year = query.get("year", None)     # 严格年份（"%Y" 或 "%Y%m%d"）
-    #         path = query.get("path", None)     # 指定文件路径（可选）
-    #     elif isinstance(query, BoundingBox):
-    #         bbox, year, path = query, None, None
-    #     else:
-    #         raise TypeError(f"Unsupported query type: {type(query)}")
-
-    #     sample = super().__getitem__(bbox)
-
-    #     # 用 bbox 命中索引
-    #     hits = self.index.intersection(tuple(bbox), objects=True)
-    #     filepaths = [hit.object for hit in hits]
-    #     sample["path"] = filepaths[0] if filepaths else ""
-
-    #     # 二次按 year 过滤（正则需捕获 (?P<date>...)，与 date_format 一致）
-    #     if year is not None:
-    #         rgx = re.compile(self.filename_regex, re.VERBOSE)
-    #         year_str = str(int(year))
-    #         keep = []
-    #         for fp in filepaths:
-    #             m = rgx.match(os.path.basename(fp))
-    #             if m and "date" in m.groupdict() and m.group("date") == year_str:
-    #                 keep.append(fp)
-    #         filepaths = keep
-
-    #     if not filepaths:
-    #         raise IndexError(f"bbox: {bbox} (year={year}) not found in index bounds: {self.bounds}")
-
-    #     # 确认最终文件（支持传入 path）
-    #     if path is not None:
-    #         if path not in filepaths:
-    #             raise IndexError(f"path {path} not matched for bbox: {bbox}")
-    #         filepath = path
-    #     else:
-    #         filepath = filepaths[0]
-
-    #     # 打开 VRT
-    #     src = self._cached_load_warp_file(filepath) if self.cache else self._load_warp_file(filepath)
-
-    #     # 计算窗口尺寸（兼容标量/二元组 res）
-    #     if isinstance(self.res, (int, float)):
-    #         res_x = res_y = float(self.res)
-    #     else:
-    #         res_x, res_y = self.res
-    #     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-    #     out_width  = math.ceil((bbox.maxx - bbox.minx) / res_x)
-    #     out_height = math.ceil((bbox.maxy - bbox.miny) / res_y)
-
-    #     # 波段索引检查
-    #     band_indexes = self.band_indexes
-    #     if band_indexes is not None:
-    #         max_band = src.count
-    #         bad = [i for i in band_indexes if i < 1 or i > max_band]
-    #         if bad:
-    #             raise IndexError(f"Requested band indexes {bad} out of range 1..{max_band} for {os.path.basename(filepath)}")
-
-    #     count = len(band_indexes) if band_indexes else src.count
-    #     out_shape = (count, out_height, out_width)
-
-    #     dest = src.read(indexes=band_indexes, out_shape=out_shape, window=from_bounds(*bounds, src.transform))
-
-    #     # dtype 兼容
-    #     if dest.dtype == np.uint16:
-    #         dest = dest.astype(np.int32)
-    #     elif dest.dtype == np.uint32:
-    #         dest = dest.astype(np.int64)
-
-    #     tensor = torch.tensor(dest)
-    #     sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
-    #     if self.is_image:
-    #         sample["image"] = tensor.float()
-    #     else:
-    #         sample["mask"] = tensor
-    #     if self.transforms is not None:
-    #         sample = self.transforms(sample)
-    #     return sample
 
     def _pick_file(
         self,
@@ -746,18 +674,6 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         bbox_t = self._year_bbox(bbox, year_t)
         bbox_tm1 = self._year_bbox(bbox, year_tm1)
 
-        # q_t = self._year_bbox(bbox, year_t)
-        # q_tm1 = self._year_bbox(bbox, year_tm1)
-
-        # q_t = {"bbox": bbox_t, "year": year_t}
-        # q_tm1 = {"bbox": bbox_tm1, "year": year_tm1}
-
-        # 确保 q_t / q_tm1 都是 BoundingBox
-        # if not isinstance(q_t, BoundingBox):
-        #     q_t = BoundingBox(*q_t)
-        # if not isinstance(q_tm1, BoundingBox):
-        #     q_tm1 = BoundingBox(*q_tm1)
-
         # 年 t 图像
         # s_img_t = self.img_ds[bbox_t]
         s_img_t = self._get_image_by_year(bbox_t, year_t)
@@ -767,20 +683,6 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         except Exception:
             print(f"[WARNING] lack year_tm1={year_tm1} image, using year_t={year_t}")
             s_img_tm1 = self._get_image_by_year(bbox_t, year_t)
-
-        # # 年 t-1 图像，若缺失则回退
-        # try:
-        #     s_img_tm1 = self.img_ds[bbox_tm1]
-        # except Exception:
-        #     print(f"[WARNING] lack year_tm1={year_tm1} image, using year_t={year_t}")
-        #     s_img_tm1 = self.img_ds[bbox_t]
-
-        # # DEM
-        # s_dem_t = self.dem_ds[q_t]
-        # try:
-        #     s_dem_tm1 = self.dem_ds[q_tm1]
-        # except Exception:
-        #     s_dem_tm1 = self.dem_ds[q_t]
 
         # DEM（允许 dem_ds 也为 None）
         if self.dem_ds is not None:
@@ -812,46 +714,11 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
             sample["dem_t"] = s_dem_t["mask"].float()
             sample["dem_tm1"] = s_dem_tm1["mask"].float()
 
-        # # mask
-        # s_mask_t = self.mask_ds[q_t]
-        # labels = s_mask_t["mask"].float()
-        # H, W = labels.shape[-2], labels.shape[-1]
-        # heatmap = labels[0:1,...]
-        # mask = labels[1:2,...]
-
-        # # retreat
-        # if self.retreat_ds is not None:
-        #     try:
-        #         s_ret = self.retreat_ds[q_t]
-        #         if s_ret["mask"].ndim == 3:
-        #             retreat = s_ret["mask"][:1,...].float()
-        #         else:
-        #             retreat = s_ret["mask"].unsqueeze(0).float()
-        #     except Exception:
-        #         retreat = torch.zeros((1, H, W), dtype=labels.dtype, device=labels.device)
-        # else:
-        #     retreat = torch.zeros((1, H, W), dtype=labels.dtype, device=labels.device)
-
-        # sample = {
-        #     "image_t": s_img_t["image"].float(),
-        #     "image_tm1": s_img_tm1["image"].float(),
-        #     "dem_t": s_dem_t["mask"].float(),
-        #     "dem_tm1": s_dem_tm1["mask"].float(),
-        #     "heatmap": heatmap,
-        #     "mask": mask,
-        #     "retreat_map": retreat,
-        #     "bbox": bbox,
-        #     "crs": self.crs,
-        #     "path_t": s_img_t.get("path", None),
-        #     "path_tm1": s_img_tm1.get("path", None),
-        #     "year_t": year_t,
-        #     "year_tm1": year_tm1,
-        # }
-
         # ------ 训练阶段：仅当 mask_ds 非 None 时才补标签 ------
         if self.mask_ds is not None:
             # q_mask_t = {"bbox": bbox_t, "year": year_t}
-            s_mask_t = self.mask_ds[bbox_t]
+            # s_mask_t = self.mask_ds[bbox_t]
+            s_mask_t = self.mask_ds[{"bbox": bbox_t, "year": year_t}]
             labels = s_mask_t["mask"].float()
             H, W = labels.shape[-2], labels.shape[-1]
             heatmap = labels[0:1,...]
