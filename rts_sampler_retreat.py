@@ -201,37 +201,18 @@ class RandomGeoSamplerMultiRoiMultiYear:
             y = int(y)
             ym1 = y - self.prev_delta
 
+            self.year_bboxs[y] = []
+
             roi_chips_list: List[List[BoundingBox]] = []
             roi_weights_list: List[float] = []
             all_chips_flat: List[BoundingBox] = []  # 用于兼容
+            all_areas_flat: List[float] = []
 
-            # for roi, roi_w in zip(roi_entry["roi"], roi_entry["weight"]):
-            #     # t 年：按年窗命中数据集，切 chip
-            #     qb_t = year_bbox(roi, y)
-            #     # qb_tm1 = year_bbox(roi, ym1)
-
-            #     # spatial cover of year t
-            #     # spatial_t: List[tuple] = []
-            #     chips_this_roi: List[BoundingBox] = []
-
-            #     for hit in self.dataset.index.intersection(tuple(qb_t), objects=True):
-            #         big = BoundingBox(*hit.bounds) & qb_t
-            #         for ch in chips_from_bbox(big):
-            #             spatial_t.append((ch, float(roi_w)))
-                
-            #     for ch, w in spatial_t:
-            #         # 检查 ch 的空间范围在 year_tm1 是否有交集
-            #         ch_as_tm1 = BoundingBox(ch.minx, ch.maxx, ch.miny, ch.maxy,
-            #                                 datetime(ym1, 1, 1).timestamp(),
-            #                                 datetime(ym1+1, 1, 1).timestamp())
-            #         hits_tm1 = list(self.dataset.index.intersection(tuple(ch_as_tm1), objects=False))
-            #         if hits_tm1:  # year_tm1 有覆盖
-            #             chips_t.append(ch)
-            #             areas_t.append(max(ch.area, 1e-9) * w)
             for roi, roi_w in zip(roi_entry["roi"], roi_entry["weight"]):
                 qb_t = year_bbox(roi, y)
-
                 chips_this_roi: List[BoundingBox] = []
+                areas_this_roi: List[float] = []
+
                 for hit in self.dataset.index.intersection(tuple(qb_t), objects=True):
                     big = BoundingBox(*hit.bounds) & qb_t
                     for ch in chips_from_bbox(big):
@@ -241,12 +222,14 @@ class RandomGeoSamplerMultiRoiMultiYear:
                                                 datetime(ym1+1, 1, 1).timestamp())
                         hits_tm1 = list(self.dataset.index.intersection(tuple(ch_as_tm1), objects=False))
                         if hits_tm1:
+                            self.year_bboxs[y].append(ch)
+                            areas_this_roi.append(max(ch.area, 1e-9) * float(roi_w))
                             chips_this_roi.append(ch)
 
                 roi_chips_list.append(chips_this_roi)
                 # ✅ 只有当 ROI 有 chips 时才记录权重
                 roi_weights_list.append(float(roi_w) if chips_this_roi else 0.0)
-                all_chips_flat.extend(chips_this_roi)
+                all_areas_flat.extend(areas_this_roi)
 
             self.year_roi_chips[y] = roi_chips_list
             rw = torch.tensor(roi_weights_list, dtype=torch.float)
@@ -256,23 +239,21 @@ class RandomGeoSamplerMultiRoiMultiYear:
 
             # 存入 year_t
             # self.year_bboxs[y] = chips_t
-            # prob_t = torch.tensor(areas_t, dtype=torch.float)
-            # if prob_t.numel() == 0:
-            #     prob_t = torch.zeros(0, dtype=torch.float)
-            # elif float(prob_t.sum()) == 0:
-            #     prob_t = torch.ones_like(prob_t)
-            # self.year_areas[y] = prob_t
-            # self.year_lengths.append(len(chips_t))
-            # print(f"[Sampler] year={y}: {len(chips_t)} valid chips (tm1={ym1} coverage verified)")
+            prob = torch.tensor(all_areas_flat, dtype=torch.float)
+            if prob.numel() > 0 and float(prob.sum()) == 0:
+                prob = torch.ones_like(prob)
+            self.year_areas[y] = prob
+            self.year_lengths.append(len(self.year_bboxs[y]))
+            print(f"[Sampler] year={y}: {len(self.year_bboxs[y])} valid chips (tm1={ym1} verified)")
             # 兼容旧结构
-            self.year_bboxs[y] = all_chips_flat
-            self.year_areas[y] = torch.ones(len(all_chips_flat), dtype=torch.float)
-            self.year_lengths.append(len(all_chips_flat))
+            # self.year_bboxs[y] = all_chips_flat
+            # self.year_areas[y] = torch.ones(len(all_chips_flat), dtype=torch.float)
+            # self.year_lengths.append(len(all_chips_flat))
 
-            print(f"[Sampler] year={y}: {len(all_chips_flat)} chips across {len(roi_chips_list)} ROIs")
+            # print(f"[Sampler] year={y}: {len(all_chips_flat)} chips across {len(roi_chips_list)} ROIs")
             for ri, (chips, w) in enumerate(zip(roi_chips_list, roi_weights_list)):
                 cid = roi_entry.get("cluster_id", list(range(len(roi_chips_list))))[ri]
-                print(f"    ROI {ri} (cluster={cid}): {len(chips)} chips, weight={w:.4f}")
+                print(f"ROI {ri} (cluster={cid}): {len(chips)} chips, weight={w:.4f}")
 
         # 总长度
         if length is not None:

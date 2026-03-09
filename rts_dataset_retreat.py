@@ -169,7 +169,13 @@ class Landsat8SR(RasterDataset):
         ]
         
         if matched_files:
-            filepath = matched_files[0]
+            # ✅ 优先选合成影像
+            COMPOSITE_KEYWORDS = ["geometric_median", "median", "medoid", "mosaic"]
+            composite_files = [
+                fp for fp in matched_files
+                if any(kw in os.path.basename(fp) for kw in COMPOSITE_KEYWORDS)
+            ]
+            filepath = composite_files[0] if composite_files else matched_files[0]
         else:
             # 如果没有精确匹配年份的文件，报错而不是使用错误的文件
             available_years = sorted(set(self._extract_dir_year(fp) for fp in filepaths if self._extract_dir_year(fp)))
@@ -742,6 +748,10 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
 
             sample["retreat_map"] = retreat
         # ----------------------------------------------------
+
+        if self.mask_ds is not None:
+            if sample["heatmap"].sum() == 0 and sample["mask"].sum() == 0:
+                return None
 
         if self.transforms is not None:
             sample = self.transforms(sample)

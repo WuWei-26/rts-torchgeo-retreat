@@ -259,14 +259,14 @@ class SiameseRTS(pl.LightningModule):
         self.loss_weight_focal = nn.Parameter(torch.tensor(10.0), requires_grad=False) # 20.0
         self.loss_weight_mse = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_area = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.loss_weight_retreat = nn.Parameter(torch.tensor(1.0), requires_grad=False)
+        self.loss_weight_retreat = nn.Parameter(torch.tensor(0.0), requires_grad=False)
 
         # task-level weights
         self.task_weight_seg = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.task_weight_heat = nn.Parameter(torch.tensor(2.0), requires_grad=False) # 2.0
-        self.task_weight_ret = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
+        self.task_weight_ret = nn.Parameter(torch.tensor(0.0), requires_grad=False) # 2.0
 
-        self.lr = nn.Parameter(torch.tensor(5e-4), requires_grad=False)
+        self.lr = nn.Parameter(torch.tensor(1e-4), requires_grad=False)
         self.encode_lr_mult = nn.Parameter(torch.tensor(encode_lr_mult), requires_grad=False)
 
         # 缓存每个 epoch 内各 step 的 loss，用于 epoch 结束时打印
@@ -410,21 +410,6 @@ class SiameseRTS(pl.LightningModule):
             print(f"Warning: pred_retreat contains non-finite values")
             pred_retreat = torch.clamp(pred_retreat, 0.0, 100.0)
 
-        # def safe_mean(x):
-        #     return torch.nanmean(torch.where(torch.isfinite(x), x, torch.zeros_like(x)))
-        # print("means:", {
-        # "dice": float(safe_mean(loss_dice)),
-        # "focal": float(safe_mean(loss_focal)),
-        # "heat": float(safe_mean(loss_heat)),
-        # "ret": float(safe_mean(loss_ret)),
-        # "area": float(safe_mean(loss_area)),
-        # })
-
-        # 目标
-        # gt_mask = batch["mask"].unsqueeze(1)              # [B,1,H,W] 二元
-        # gt_heatmap = batch["heatmap"].unsqueeze(1)           # [B,1,H,W] 连续
-        # gt_retreat = batch["retreat_map"].unsqueeze(1)       # [B,1,H,W] 连续（你的“头壁后退图”）
-
         def ensure_ch1(t: torch.Tensor) -> torch.Tensor:
             # 标准化为 [B,1,H,W]，仅当标签为 [B,H,W] 时才 unsqueeze
             return t.unsqueeze(1) if t.dim() == 3 else t
@@ -453,23 +438,6 @@ class SiameseRTS(pl.LightningModule):
         loss_area  = self.loss_fn_area(
             torch.where(mask_heat, pred_heat, torch.zeros_like(pred_heat)),
             torch.where(mask_heat, gt_heatmap, torch.zeros_like(gt_heatmap)))
-
-        # valid_pix = torch.isfinite(gt_retreat)  # [B,1,H,W]
-        # per_pix_mse = (pred_retreat - gt_retreat) ** 2                # [B,1,H,W]
-        # per_pix_mse = torch.where(valid_pix, per_pix_mse, torch.zeros_like(per_pix_mse))
-
-        # # 跳过“全零标签样本”
-        # sample_has_retreat = (gt_retreat.abs().sum(dim=(1,2,3)) > 0).float()  # [B]
-        # if sample_has_retreat.sum() > 0:
-        #     # 按样本平均（只对有 retreat 的样本）
-        #     # 也可改为“按像元平均”（micro），看你的评估偏好
-        #     per_sample = per_pix_mse.mean(dim=(1,2,3))  # [B]
-        #     loss_ret = (per_sample * sample_has_retreat).sum() / sample_has_retreat.sum()
-        # else:
-        #     loss_ret = torch.tensor(0., device=gt_retreat.device)
-
-        # ---------- Retreat loss：使用 LossWeightedMSE ----------
-        # 目标: pred_retreat, gt_retreat 形状 [B,1,H,W]，范围 0~1（已除以 RETREAT_SCALE）
 
         # 1) 处理无效像素（NaN/Inf）
         valid_pix = torch.isfinite(gt_retreat)
@@ -584,6 +552,9 @@ class SiameseRTS(pl.LightningModule):
               f"area={float(loss_area):.4f}")
 
     def training_step(self, batch, batch_idx): 
+        if batch is None:
+            return None
+        
         info = self.shared_step(batch, "train")
 
         # 记录到缓存，供 on_train_epoch_end 聚合
@@ -607,6 +578,9 @@ class SiameseRTS(pl.LightningModule):
         return info
 
     def validation_step(self, batch, batch_idx):
+        if batch is None:
+            return None
+        
         info = self.shared_step(batch, "valid")
 
         self._epoch_outputs["valid"].append({
@@ -629,6 +603,8 @@ class SiameseRTS(pl.LightningModule):
         return info
 
     def test_step(self, batch, batch_idx):
+        if batch is None:
+            return None
         info = self.shared_step(batch, "test")
 
         self._epoch_outputs["test"].append({
@@ -701,7 +677,8 @@ class SiameseRTS(pl.LightningModule):
 
         # --------- 辅助函数：聚合并打印 ---------
     def _aggregate_and_print_epoch(self, stage: str):
-        outputs = self._epoch_outputs[stage]
+        # outputs = self._epoch_outputs[stage]
+        outputs = [x for x in self._epoch_outputs[stage] if x is not None]
         if len(outputs) == 0:
             return
 
@@ -732,12 +709,21 @@ class SiameseRTS(pl.LightningModule):
 
     # --------- Lightning v2 推荐的 epoch hooks ---------
     def on_train_epoch_end(self):
+        self._epoch_outputs["train"] = [
+        x for x in self._epoch_outputs["train"] if x is not None
+    ]
         self._aggregate_and_print_epoch("train")
 
     def on_validation_epoch_end(self):
+        self._epoch_outputs["valid"] = [
+        x for x in self._epoch_outputs["valid"] if x is not None
+    ]
         self._aggregate_and_print_epoch("valid")
 
     def on_test_epoch_end(self):
+        self._epoch_outputs["test"] = [
+        x for x in self._epoch_outputs["test"] if x is not None
+    ]
         self._aggregate_and_print_epoch("test")
 
     def configure_optimizers(self):

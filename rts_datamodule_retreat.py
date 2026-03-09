@@ -61,6 +61,12 @@ CRS_AEA = rasterio.CRS.from_proj4(
 RETREAT_SCALE =  28.90128517150879 # global_max retreat = 28.90128517150879
 # RETREAT_SCALE =  1.0 # dont scale
 
+def collate_fn_skip_none(batch):
+    batch = [b for b in batch if b is not None]
+    if len(batch) == 0:
+        return None
+    return stack_samples(batch)  # 用torchgeo的stack_samples保持一致
+
 # TODO: mask portion of DEM pixels
 # add noise, alter brightness
 class DataAugmentation(torch.nn.Module):
@@ -448,7 +454,7 @@ class LandsatDataModule(pl.LightningDataModule):
             sampler=self.train_sampler,
             num_workers=N_WORKERS,
             batch_size=self.batch_size,
-            collate_fn=stack_samples,
+            collate_fn=collate_fn_skip_none,
         )
 
     def val_dataloader(self):
@@ -457,7 +463,7 @@ class LandsatDataModule(pl.LightningDataModule):
             sampler=self.val_sampler,
             num_workers=N_WORKERS,
             batch_size=self.batch_size,
-            collate_fn=stack_samples,
+            collate_fn=collate_fn_skip_none,
         )
 
     def test_dataloader(self):
@@ -466,7 +472,7 @@ class LandsatDataModule(pl.LightningDataModule):
             sampler=self.test_sampler,
             num_workers=N_WORKERS,
             batch_size=self.batch_size,
-            collate_fn=stack_samples,
+            collate_fn=collate_fn_skip_none,
         )
 
     def predict_dataloader(self):
