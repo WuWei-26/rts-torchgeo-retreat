@@ -244,8 +244,8 @@ class SiameseRTS(pl.LightningModule):
         self.seg_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
         self.heat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
         # 头壁后退：仅用 U_r
-        self.retreat_head = ConvMLPHead(in_ch=dec_out_ch, out_ch=1, mid_ch=64) # FOR PREVIOUS VERSIONS ONLY!
-        # self.retreat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
+        # self.retreat_head = ConvMLPHead(in_ch=dec_out_ch, out_ch=1, mid_ch=64) # FOR PREVIOUS VERSIONS ONLY!
+        self.retreat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
 
         # losses
         self.loss_fn_dice = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
@@ -259,12 +259,12 @@ class SiameseRTS(pl.LightningModule):
         self.loss_weight_focal = nn.Parameter(torch.tensor(10.0), requires_grad=False) # 20.0
         self.loss_weight_mse = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_area = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.loss_weight_retreat = nn.Parameter(torch.tensor(0.0), requires_grad=False)
+        self.loss_weight_retreat = nn.Parameter(torch.tensor(1.0), requires_grad=False)
 
         # task-level weights
         self.task_weight_seg = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.task_weight_heat = nn.Parameter(torch.tensor(2.0), requires_grad=False) # 2.0
-        self.task_weight_ret = nn.Parameter(torch.tensor(0.0), requires_grad=False) # 2.0
+        self.task_weight_ret = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 2.0
 
         self.lr = nn.Parameter(torch.tensor(1e-4), requires_grad=False)
         self.encode_lr_mult = nn.Parameter(torch.tensor(encode_lr_mult), requires_grad=False)
@@ -361,8 +361,8 @@ class SiameseRTS(pl.LightningModule):
         # 多任务输出
         logits_mask = self.seg_head(merged)    # [B,1,H,W], from_logits=True
         heatmap = self.heat_head(merged)   # [B,1,H,W], regression
-        retreat_map = self.retreat_head(up_r)  # [B,1,H,W], regression # FOR PREVIOUS VERSIONS ONLY!
-        # retreat_map = self.retreat_head(merged)  # [B,1,H,W], regression
+        # retreat_map = self.retreat_head(up_r)  # [B,1,H,W], regression # FOR PREVIOUS VERSIONS ONLY!
+        retreat_map = self.retreat_head(merged)  # [B,1,H,W], regression
 
         return {"logits_mask": logits_mask, "heatmap": heatmap, "retreat": retreat_map}
 
