@@ -15,13 +15,11 @@ from rts_datamodule_retreat import LandsatPairInferenceDataModule
 from rasterio.crs import CRS
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+import rasterio
+from rasterio.transform import from_bounds
+from rasterio.windows import from_bounds as window_from_bounds
+
 class PairTemporalDataset(torch.utils.data.Dataset):
-    """
-    推理用的成对数据集：只返回影像与 DEM：
-      keys: image_t, image_tm1, dem_t, dem_tm1
-    - img_ds: Landsat8SR 或 Union(Landsat8SR, Landsat57SR)
-    - dem_ds: MeanTPI（或其它 DEM/TPI 数据集）
-    """
 
     @staticmethod
     def _year_bbox(bbox: BoundingBox, year: int) -> BoundingBox:
@@ -104,7 +102,7 @@ def expand_and_mask(image: Tensor, heatmap: Tensor, segment: Tensor, bbox: Bound
 
     # heatmap_mask =  heatmap > 0 # 0.1
     # heatmap_mask = image_mask & heatmap_mask # mask both input and output
-    # segment_mask = segment > 0.5
+    segment = (segment > 0.5).float()
     # segment_mask = segment_mask & image_mask
 
 
@@ -124,26 +122,19 @@ def expand_and_mask(image: Tensor, heatmap: Tensor, segment: Tensor, bbox: Bound
 
 def save_predictions(
     export_path: Path,
-    bbox: BoundingBox,
+    # bbox: BoundingBox, rs,
+    res: int,
+    transform,
     crs: CRS,
     pr_heatmap: np.ndarray,
     pr_segment: np.ndarray,
     pr_count: np.ndarray,
     image_count: np.ndarray,
 ) -> bool:
-    """
-    将整图预测写出为 4 波段的 GeoTIFF:
-      band1: pr_heatmap
-      band2: pr_segment
-      band3: pr_count
-      band4: image_count
-
-    所有输入可以是 (H,W) 或 (1,H,W) 或 (B,1,H,W)，函数内部统一为 (4,H,W) 再写入。
-    """
+    
     import rasterio
     import numpy as np
 
-    # ---- 1. 转为 numpy & squeeze 到 (H,W) ----
     def to_hw(x, name):
         x = np.asarray(x, dtype=np.float32)
         x = np.squeeze(x)          # 去掉所有长度为1的维度
@@ -163,9 +154,10 @@ def save_predictions(
     print("  image_count:", image_count.shape)
 
     height, width = pr_heatmap.shape
-    rio_transform = rasterio.transform.from_bounds(
-        bbox.minx, bbox.miny, bbox.maxx, bbox.maxy, width, height
-    )
+
+    # rio_transform = rasterio.transform.from_bounds(
+    #     bbox.minx, bbox.miny, bbox.maxx, bbox.maxy, width, height
+    # )
 
     profile = {
         "driver": "GTiff",
@@ -174,7 +166,7 @@ def save_predictions(
         "count": 4,
         "dtype": "float32",
         "crs": crs,
-        "transform": rio_transform,
+        "transform": transform,
         "compress": "lzw",
     }
 
@@ -192,68 +184,6 @@ def save_predictions(
 
     print("Prediction results saved:\n", export_path)
     return True
-
-# def save_predictions(
-#         export_path: Path,
-#         bbox: BoundingBox,
-#         crs: CRS,
-#         pr_heatmap: np.ndarray,
-#         pr_segment: np.ndarray,
-#         pr_count: np.ndarray,
-#         image_count: np.ndarray
-# ):
-#     height = pr_heatmap.shape[-2]
-#     width = pr_heatmap.shape[-1]
-#     rio_transform = rasterio.transform.from_bounds(
-#         bbox.minx, bbox.miny, bbox.maxx, bbox.maxy, width, height)  # west, south, east, north, width, height
-
-#     # .format(test_year=test_year, composite=composite, stem=filepath.stem, model=model_name, suffix=filepath.suffix)
-#     with rasterio.open(
-#             export_path,
-#             mode="w",
-#             driver="GTiff",
-#             height=height,
-#             width=width,
-#             count=4,
-#             dtype=np.dtype('float32'),
-#             crs=crs,
-#             transform=rio_transform
-#     ) as pr_mask_dataset:
-#         pr_mask_dataset.write(pr_heatmap, 1)  # index start from 1
-#         pr_mask_dataset.set_band_description(1, 'heatmap')
-#         pr_mask_dataset.write(pr_segment, 2)  # index start from 1
-#         pr_mask_dataset.set_band_description(2, 'segment')
-#         pr_mask_dataset.write(pr_count, 3)  # index start from 1
-#         pr_mask_dataset.set_band_description(3, 'count')
-#         pr_mask_dataset.write(image_count, 4)  # index start from 1
-#         pr_mask_dataset.set_band_description(4, 'image_count')
-#     print('Prediction results saved: \n', export_path)
-#     return True
-
-
-# def show_results(image, heatmap, bright):
-#     plt.figure(figsize=(16, 8))
-
-#     plt_col = 2
-#     plt.subplot(1, plt_col, 1)
-#     # print(image.max())
-#     # convert CHW -> HWC
-#     plt.imshow((image*bright).clamp(min=0, max=1).permute(1, 2, 0))
-#     plt.title("Input Image (R G B)")
-#     plt.axis("off")
-
-#     plt.subplot(1, plt_col, 2)
-#     print('heatmap max value:', heatmap.max())
-#     # just squeeze classes dim, because we have only one class
-#     plt.imshow(heatmap.clip(min=0.05, max=1.2), cmap='jet')
-#     plt.title("Heatmap Prediction")
-#     plt.axis("off")
-
-#     # plt.subplot(1, plt_col, 2)
-#     # plt.imshow(count, cmap='gray') # just squeeze classes dim, because we have only one class
-#     # plt.title("Heatmap GT")
-#     # plt.axis("off")
-#     plt.show()
 
 def show_results(image, heatmap, bright=3):
     # image -> RGB
@@ -298,131 +228,27 @@ def show_results(image, heatmap, bright=3):
     plt.tight_layout()
     plt.show()
 
-def predict_and_export(
-        rts_model,
-        trainer: pl.Trainer,
-        datamodule,
-        model_name: str,
-        date_str: str,
-        export_dir: Path,
-):
-    predict_dataloader = datamodule.predict_dataloader()
-    target_bbox = datamodule.roi
-
-    predictions_list = trainer.predict(
-        model=rts_model, dataloaders=predict_dataloader
-    )
-
-    # 使用累加数组和计数数组来计算平均值
-    pr_heatmap_sum = None
-    pr_segment_sum = None
-    image_count = None
-    target_crs = None
-
-    for data_batch, predictions in zip(predict_dataloader, predictions_list):
-        pr_heatmaps = predictions['heatmap']     # [B,1,H,W]
-        pr_segments = predictions['prob_mask']   # [B,1,H,W]
-        image_batch = data_batch['image_t']      # [B,C,H,W]
-
-        idx = 0  # batch_size = 1
-        image = image_batch[idx]           # [C,H,W]
-        pr_heatmap = pr_heatmaps[idx, 0]   # [H,W]
-        pr_segment = pr_segments[idx, 0]   # [H,W]
-        
-        # ✅ 修复：正确获取 bbox
-        data_bbox = data_batch['bbox']
-        if isinstance(data_bbox, (list, tuple)):
-            data_bbox = data_bbox[idx]
-        
-        # ✅ 修复：正确获取 crs
-        target_crs = data_batch['crs']
-        if isinstance(target_crs, (list, tuple)):
-            target_crs = target_crs[idx]
-
-        # 展开到整图坐标
-        pr_heatmap_exp, pr_segment_exp, image_mask_exp = expand_and_mask(
-            image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30
-        )
-
-        # ✅ 修复：确保转换为 2D numpy 数组
-        def to_2d_numpy(arr):
-            """将数组转换为 2D numpy 数组"""
-            if hasattr(arr, 'filled'):
-                arr = arr.filled(0)
-            if hasattr(arr, 'numpy'):
-                arr = arr.numpy()
-            arr = np.array(arr, dtype=np.float32)
-            # 去除多余维度，确保是 2D
-            while arr.ndim > 2:
-                arr = arr.squeeze(0)
-            return arr
-        
-        pr_heatmap_np = to_2d_numpy(pr_heatmap_exp)
-        pr_segment_np = to_2d_numpy(pr_segment_exp)
-        image_mask_np = to_2d_numpy(image_mask_exp)
-
-        # 初始化累加数组
-        if pr_heatmap_sum is None:
-            pr_heatmap_sum = np.zeros_like(pr_heatmap_np, dtype=np.float32)
-            pr_segment_sum = np.zeros_like(pr_segment_np, dtype=np.float32)
-            image_count = np.zeros_like(pr_heatmap_np, dtype=np.float32)
-
-        # 只在有效区域累加
-        valid_mask = image_mask_np > 0
-        pr_heatmap_sum[valid_mask] += pr_heatmap_np[valid_mask]
-        pr_segment_sum[valid_mask] += pr_segment_np[valid_mask]
-        image_count[valid_mask] += 1
-
-    # 计算平均值（避免除以0）
-    image_count_safe = np.maximum(image_count, 1)
-    pr_heatmap_mean = pr_heatmap_sum / image_count_safe
-    pr_segment_mean = pr_segment_sum / image_count_safe
-
-    # 无覆盖区域设为0
-    pr_heatmap_mean[image_count == 0] = 0
-    pr_segment_mean[image_count == 0] = 0
-
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    print("pr_heatmap_mean shape:", pr_heatmap_mean.shape)
-    print(f"image_count 范围: [{image_count.min()}, {image_count.max()}]")
-
-    # 保存结果
-    pr_tiff_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
-
-    save_predictions(
-        export_path=pr_tiff_path,
-        bbox=target_bbox,
-        crs=target_crs,
-        pr_heatmap=pr_heatmap_mean,
-        pr_segment=pr_segment_mean,
-        pr_count=pr_segment_sum,
-        image_count=image_count,
-    )
-    
-    print(f"Successfully exported to: {pr_tiff_path}")
-    return True
-
 # def predict_and_export(
 #         rts_model,
 #         trainer: pl.Trainer,
-#         datamodule: LandsatPairInferenceDataModule,
+#         datamodule,
 #         model_name: str,
 #         date_str: str,
 #         export_dir: Path,
 # ):
 #     predict_dataloader = datamodule.predict_dataloader()
 #     target_bbox = datamodule.roi
+#     res=30
 
 #     predictions_list = trainer.predict(
 #         model=rts_model, dataloaders=predict_dataloader
 #     )
 
-#     # 使用累加数组和计数数组来计算平均值
 #     pr_heatmap_sum = None
 #     pr_segment_sum = None
 #     image_count = None
 #     target_crs = None
+#     target_transform = None
 
 #     for data_batch, predictions in zip(predict_dataloader, predictions_list):
 #         pr_heatmaps = predictions['heatmap']     # [B,1,H,W]
@@ -430,57 +256,60 @@ def predict_and_export(
 #         image_batch = data_batch['image_t']      # [B,C,H,W]
 
 #         idx = 0  # batch_size = 1
-#         image = image_batch[idx]
-#         pr_heatmap = pr_heatmaps[idx, 0]
-#         pr_segment = pr_segments[idx, 0]
-#         data_bbox = data_batch['bbox'][idx]
+#         image = image_batch[idx]           # [C,H,W]
+#         pr_heatmap = pr_heatmaps[idx, 0]   # [H,W]
+#         pr_segment = pr_segments[idx, 0]   # [H,W]
+        
+#         data_bbox = data_batch['bbox']
+#         if isinstance(data_bbox, (list, tuple)):
+#             data_bbox = data_bbox[idx]
+        
+#         target_crs = data_batch['crs']
+#         if isinstance(target_crs, (list, tuple)):
+#             target_crs = target_crs[idx]
 
-#         img_rgb = data_batch["image_t"][0, datamodule.rgb_indexes, :, :]
-#         target_crs = data_batch['crs'][0]
+#         if target_transform is None:
+#             from rasterio.transform import from_origin
+#             import math
+#             # snap target_bbox origin 到数据网格
+#             snap_minx = math.floor(target_bbox.minx / res) * res
+#             snap_maxy = math.ceil(target_bbox.maxy / res) * res
+#             target_transform = from_origin(snap_minx, snap_maxy, res, res)
 
 #         # 展开到整图坐标
 #         pr_heatmap_exp, pr_segment_exp, image_mask_exp = expand_and_mask(
 #             image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30
 #         )
 
-#         # 转换为 numpy（如果还是 tensor）
-#         if hasattr(pr_heatmap_exp, 'numpy'):
-#             pr_heatmap_np = pr_heatmap_exp.numpy() if not hasattr(pr_heatmap_exp, 'filled') else pr_heatmap_exp.filled(0)
-#         elif hasattr(pr_heatmap_exp, 'filled'):
-#             pr_heatmap_np = pr_heatmap_exp.filled(0)
-#         else:
-#             pr_heatmap_np = np.array(pr_heatmap_exp)
-            
-#         if hasattr(pr_segment_exp, 'numpy'):
-#             pr_segment_np = pr_segment_exp.numpy() if not hasattr(pr_segment_exp, 'filled') else pr_segment_exp.filled(0)
-#         elif hasattr(pr_segment_exp, 'filled'):
-#             pr_segment_np = pr_segment_exp.filled(0)
-#         else:
-#             pr_segment_np = np.array(pr_segment_exp)
-            
-#         if hasattr(image_mask_exp, 'numpy'):
-#             image_mask_np = image_mask_exp.numpy() if hasattr(image_mask_exp, 'numpy') else np.array(image_mask_exp)
-#         else:
-#             image_mask_np = np.array(image_mask_exp)
+#         def to_2d_numpy(arr):
+#             """将数组转换为 2D numpy 数组"""
+#             if hasattr(arr, 'filled'):
+#                 arr = arr.filled(0)
+#             if hasattr(arr, 'numpy'):
+#                 arr = arr.numpy()
+#             arr = np.array(arr, dtype=np.float32)
+#             while arr.ndim > 2:
+#                 arr = arr.squeeze(0)
+#             return arr
+        
+#         pr_heatmap_np = to_2d_numpy(pr_heatmap_exp)
+#         pr_segment_np = to_2d_numpy(pr_segment_exp)
+#         image_mask_np = to_2d_numpy(image_mask_exp)
 
-#         # 初始化累加数组
 #         if pr_heatmap_sum is None:
 #             pr_heatmap_sum = np.zeros_like(pr_heatmap_np, dtype=np.float32)
 #             pr_segment_sum = np.zeros_like(pr_segment_np, dtype=np.float32)
-#             image_count = np.zeros_like(image_mask_np, dtype=np.float32)
+#             image_count = np.zeros_like(pr_heatmap_np, dtype=np.float32)
 
-#         # 只在有效区域累加
 #         valid_mask = image_mask_np > 0
 #         pr_heatmap_sum[valid_mask] += pr_heatmap_np[valid_mask]
 #         pr_segment_sum[valid_mask] += pr_segment_np[valid_mask]
 #         image_count[valid_mask] += 1
 
-#     # 计算平均值（避免除以0）
 #     image_count_safe = np.maximum(image_count, 1)
 #     pr_heatmap_mean = pr_heatmap_sum / image_count_safe
 #     pr_segment_mean = pr_segment_sum / image_count_safe
 
-#     # 无覆盖区域设为0
 #     pr_heatmap_mean[image_count == 0] = 0
 #     pr_segment_mean[image_count == 0] = 0
 
@@ -489,18 +318,12 @@ def predict_and_export(
 #     print("pr_heatmap_mean shape:", pr_heatmap_mean.shape)
 #     print(f"image_count 范围: [{image_count.min()}, {image_count.max()}]")
 
-#     # 可视化
-#     try:
-#         show_results(image=img_rgb, heatmap=pr_heatmap_mean, bright=3)
-#     except Exception as e:
-#         print("show_results ERROR", e)
-
-#     # 保存结果 - 使用 mean 而非 median
 #     pr_tiff_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
 
 #     save_predictions(
 #         export_path=pr_tiff_path,
-#         bbox=target_bbox,
+#         res=res,
+#         transform=target_transform,
 #         crs=target_crs,
 #         pr_heatmap=pr_heatmap_mean,
 #         pr_segment=pr_segment_mean,
@@ -508,221 +331,85 @@ def predict_and_export(
 #         image_count=image_count,
 #     )
     
-#     print(f"Prediction exported to: {pr_tiff_path}")
+#     print(f"Successfully exported to: {pr_tiff_path}")
 #     return True
 
-# def predict_and_export(
-#         rts_model,
-#         trainer: pl.Trainer,
-#         datamodule: LandsatPairInferenceDataModule,
-#         model_name: str,
-#         date_str: str,
-#         export_dir: Path,
-# ):
+def predict_and_export_georef(
+    rts_model, trainer, datamodule,
+    model_name, date_str, export_dir
+):
+    predict_dataloader = datamodule.predict_dataloader()
+    target_bbox = datamodule.roi
+    res = 30  # ✅ 明确定义
 
-#     predict_dataloader = datamodule.predict_dataloader()
-#     target_bbox = datamodule.roi
+    H = int(round((target_bbox.maxy - target_bbox.miny) / res))
+    W = int(round((target_bbox.maxx - target_bbox.minx) / res))
 
-#     predictions_list = trainer.predict(
-#         model=rts_model, dataloaders=predict_dataloader
-#     )
+    heatmap_sum = np.zeros((H, W), dtype=np.float32)
+    segment_sum = np.zeros((H, W), dtype=np.float32)
+    count_arr   = np.zeros((H, W), dtype=np.float32)
 
-#     pr_heatmap_list_np = []
-#     pr_segment_list_np = []
-#     image_mask_list_np = []
+    from rasterio.transform import from_origin
+    global_transform = from_origin(
+        target_bbox.minx, target_bbox.maxy, res, res
+    )
+    target_crs = None
 
-#     # pr_heatmap_sum = None
-#     # pr_segment_sum = None
-#     # image_count = None
-#     # target_crs = None
+    predictions_list = trainer.predict(
+        model=rts_model, dataloaders=predict_dataloader
+    )
+
+    for data_batch, predictions in zip(predict_dataloader, predictions_list):
+        pr_heatmap = predictions['heatmap'][0, 0].numpy()
+        pr_segment = predictions['prob_mask'][0, 0].numpy()
+        image_t    = data_batch['image_t'][0]
+
+        data_bbox = data_batch['bbox']
+        if isinstance(data_bbox, (list, tuple)):
+            data_bbox = data_bbox[0]
+
+        if target_crs is None:
+            target_crs = data_batch['crs']
+            if isinstance(target_crs, (list, tuple)):
+                target_crs = target_crs[0]
+
+        col_off = int(round((data_bbox.minx - target_bbox.minx) / res))
+        row_off = int(round((target_bbox.maxy - data_bbox.maxy) / res))
+        patch_h, patch_w = pr_heatmap.shape
+
+        row_end = min(row_off + patch_h, H)
+        col_end = min(col_off + patch_w, W)
+        patch_h_clip = row_end - row_off
+        patch_w_clip = col_end - col_off
+
+        if row_off < 0 or col_off < 0 or patch_h_clip <= 0 or patch_w_clip <= 0:
+            continue
+
+        valid = (image_t[0, :patch_h_clip, :patch_w_clip].numpy() != 0)
+        heatmap_sum[row_off:row_end, col_off:col_end][valid] += pr_heatmap[:patch_h_clip, :patch_w_clip][valid]
+        segment_sum[row_off:row_end, col_off:col_end][valid] += pr_segment[:patch_h_clip, :patch_w_clip][valid]
+        count_arr  [row_off:row_end, col_off:col_end][valid] += 1
+
+    safe_count = np.maximum(count_arr, 1)
+    heatmap_mean = heatmap_sum / safe_count
+    segment_mean = segment_sum / safe_count
+    heatmap_mean[count_arr == 0] = 0
+    segment_mean[count_arr == 0] = 0
+
+    segment_binary = (segment_mean > 0.5).astype(np.float32)
+    heatmap_mean = heatmap_mean * segment_binary
     
-#     for data_batch, predictions in zip(predict_dataloader, predictions_list):
-#         pr_heatmaps = predictions['heatmap']     # [B,1,H,W]
-#         pr_segments = predictions['prob_mask']   # [B,1,H,W] 或 segment prob
-#         image_batch = data_batch['image_t']      # [B,C,H,W]
+    export_dir.mkdir(parents=True, exist_ok=True)
+    out_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
 
-#         idx = 0  # batch_size = 1
-#         image = image_batch[idx]                  # [C,H,W]
-#         pr_heatmap = pr_heatmaps[idx, 0]              # [H,W]
-#         pr_segment = pr_segments[idx, 0]              # [H,W]
-#         data_bbox = data_batch['bbox'][idx]
-
-#         # 直接从数据批次获取必要信息（只为了 show / profile）
-#         img_rgb = data_batch["image_t"][0, datamodule.rgb_indexes, :, :]
-#         target_crs = data_batch['crs'][0]
-
-#         # 展开到整图坐标 & 掩膜
-#         pr_heatmap_ma, pr_segment_ma, image_mask_np = expand_and_mask(
-#             image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30
-#         )
-#         pr_heatmap_list_np.append(pr_heatmap_ma)
-#         pr_segment_list_np.append(pr_segment_ma)
-#         image_mask_list_np.append(image_mask_np)
-
-#     # ---- 拼整图：对所有 patch 沿 axis=0 做 median ----
-#     pr_segment_concat_np = np.ma.concatenate(pr_segment_list_np, axis=0)   # [N,1,H,W] masked
-#     pr_heatmap_concat_np = np.ma.concatenate(pr_heatmap_list_np, axis=0)   # [N,1,H,W] masked
-
-#     pr_segment_median = np.ma.median(pr_segment_concat_np, axis=0).filled(fill_value=0)   # (1,H,W)
-#     pr_heatmap_median = np.ma.median(pr_heatmap_concat_np, axis=0).filled(fill_value=0)   # (1,H,W)
-
-#     # 计数/覆盖次数
-#     pr_heatmap_count = np.ma.sum(pr_segment_concat_np, axis=0).filled(fill_value=0)       # (1,H,W)
-#     image_mask_concat_np = np.concatenate(image_mask_list_np, axis=0)                     # (N,1,H,W)
-#     image_count = np.sum(image_mask_concat_np, axis=0)                                    # (1,H,W)
-
-#     export_dir.mkdir(parents=True, exist_ok=True)
-
-#     print("pr_heatmap_median shape:", pr_heatmap_median.shape)
-
-#     # 可视化看一眼整图（只取 band 和 heatmap）
-#     try:
-#         show_results(image=img_rgb,  # [C,H_patch,W_patch]；对整图可以接受整体色调
-#                      heatmap=pr_heatmap_median,
-#                      bright=3)
-#     except Exception as e:
-#         print("show_results ERROR", e)
-
-#     composites = ['median']
-#     for composite in composites:
-#         pr_tiff_path = export_dir / f"pr_mask_{date_str}_{composite}_{model_name}.tif"
-
-#         save_predictions(
-#             export_path=pr_tiff_path,
-#             bbox=target_bbox,
-#             crs=target_crs,
-#             pr_heatmap=pr_heatmap_median,    # (1,H,W)
-#             pr_segment=pr_segment_median,    # (1,H,W)
-#             pr_count=pr_heatmap_count,       # (1,H,W)
-#             image_count=image_count,         # (1,H,W)
-#         )
-#     return True
-
-# def predict_and_export(
-#         rts_model,
-#         trainer: pl.Trainer,
-#         datamodule: LandsatPairInferenceDataModule,
-#         model_name: str,
-#         date_str: str,
-#         export_dir: Path,
-# ):
-
-#     predict_dataloader = datamodule.predict_dataloader()
-#     target_bbox = datamodule.roi
-#     # test_year = datamodule.year
-
-#     predictions_list = trainer.predict(
-#         model=rts_model, dataloaders=datamodule.predict_dataloader())
-
-#     pr_heatmap_list_np = []
-#     pr_segment_list_np = []
-#     image_mask_list_np = []
-
-#     raster_filepath_set = False
-#     # TODO: avoid call dataloader twice here, find a way to save the meta data information
-#     for data_batch, predictions in zip(predict_dataloader, predictions_list):
-#         # pr_heatmaps = predictions['pred_heat']
-#         # pr_segments = predictions['prob_mask']
-#         pr_heatmaps = predictions['heatmap']
-#         pr_segments = predictions['prob_mask']
-#         image_batch = data_batch['image_t']
-
-#         idx = 0  # batch_size = 1
-#         image = image_batch[idx, :, :, :]
-#         pr_heatmap = pr_heatmaps[idx, :, :]
-#         pr_segment = pr_segments[idx, :, :]
-#         data_bbox = data_batch['bbox'][idx]
-#         # filepath = data_batch['path'][idx]
-
-#         # if 'median' in filepath and 'geometric' not in filepath:
-#     #     if 'mosaic' in filepath:
-#     #         # data_batch_median = data_batch
-#     #         img_rgb = data_batch["image"][0, datamodule.rgb_indexes, :, :]
-#     #         target_crs = data_batch['crs'][0]
-#     #         raster_filepath = Path(filepath)
-#     #         raster_filepath_set = True
-#     #         print(f'Raster for visualizing:\n{filepath}')
-#     #     else:
-#     #         print(filepath)
-
-#     #     pr_heatmap_ma, pr_segment_ma, image_mask_np = expand_and_mask(
-#     #         image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30)
-#     #     pr_heatmap_list_np.append(pr_heatmap_ma)
-#     #     pr_segment_list_np.append(pr_segment_ma)
-#     #     image_mask_list_np.append(image_mask_np)
-
-#     # if not raster_filepath_set:
-#     #     img_rgb = data_batch["image"][0, datamodule.rgb_indexes, :, :]
-#     #     target_crs = data_batch['crs'][0]
-#     #     raster_filepath = Path(filepath)
-#     #     raster_filepath_set = True
-#     #     print(f'Raster for visualizing:\n{filepath}')
-
-#         # 直接从数据批次获取必要信息
-#         img_rgb = data_batch["image_t"][0, datamodule.rgb_indexes, :, :]
-#         target_crs = data_batch['crs'][0]
-
-#         pr_heatmap_ma, pr_segment_ma, image_mask_np = expand_and_mask(
-#             image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30)
-#         pr_heatmap_list_np.append(pr_heatmap_ma)
-#         pr_segment_list_np.append(pr_segment_ma)
-#         image_mask_list_np.append(image_mask_np)
-
-#     pr_segment_concat_np = np.ma.concatenate(pr_segment_list_np, axis=0)
-#     pr_heatmap_concat_np = np.ma.concatenate(pr_heatmap_list_np, axis=0)
-#     pr_segment_median = np.ma.median(
-#         pr_segment_concat_np, axis=0).filled(fill_value=0)
-#     pr_heatmap_median = np.ma.median(
-#         pr_heatmap_concat_np, axis=0).filled(fill_value=0)
-#     # pr_segment_mean = np.ma.mean(
-#     #     pr_segment_concat_np, axis=0).filled(fill_value=0)
-#     # pr_heatmap_mean = np.ma.mean(
-#     #     pr_heatmap_concat_np, axis=0).filled(fill_value=0)
-
-#     # pr_heatmap_count = np.ma.count(pr_heatmap_concat_np, axis=0) # Count the non-masked elements of the array along the given axis.
-#     pr_heatmap_count = np.ma.sum(pr_segment_concat_np, axis=0).filled(
-#         fill_value=0)  # sum the segment values
-#     image_mask_concat_np = np.concatenate(image_mask_list_np, axis=0)
-#     image_count = np.sum(image_mask_concat_np, axis=0)
-#     # count_mask = pr_heatmap_count >= 2
-#     # pr_heatmap_median[~count_mask] = 0
-#     # pr_segment_median[~count_mask] = 0
-#     # pr_heatmap_mean[~count_mask] = 0
-#     # pr_segment_mean[~count_mask] = 0
-#     # mask heatmap and segment with the count mask
-
-#     # export_dir = Path(f'/DATA/DATA1/joey/pr_mask_rts_aea_{suffix}')
-#     export_dir.mkdir(parents=True, exist_ok=True)
-    
-#     # DEBUG
-#     print("pr_heatmap_median shape:", pr_heatmap_median.shape) # DEBUG
-#     # squeeze 通道维 -> (H,W)
-#     # if pr_heatmap_median.ndim == 3 and pr_heatmap_median.shape[0] == 1:
-#     #     pr_heatmap_median = pr_heatmap_median[0]   # (H,W)
-#     # if pr_segment_median.ndim == 3 and pr_segment_median.shape[0] == 1:
-#     #     pr_segment_median = pr_segment_median[0]   # (H,W)
-#     # #
-
-#     show_results(image=img_rgb,
-    
-#                  heatmap=pr_heatmap_median,
-#                  bright=3)
-#     composites = ['median']
-#     # pr_heatmap_list = [pr_heatmap_median, pr_heatmap_mean]
-#     # pr_segment_list = [pr_segment_median, pr_segment_mean]
-#     for composite in composites:
-#         # pr_tiff_path = export_dir / \
-#             # f"pr_mask_{date_str}_{composite}_{model_name}_{raster_filepath.stem}{raster_filepath.suffix}"
-#             # 使用固定的文件名格式，移除原始文件名相关部分
-#         pr_tiff_path = export_dir / f"pr_mask_{date_str}_{composite}_{model_name}.tif"
- 
-#         save_predictions(
-#             export_path=pr_tiff_path,
-#             bbox=target_bbox,
-#             crs=target_crs,
-#             pr_heatmap=pr_heatmap_median,
-#             pr_segment=pr_segment_median,
-#             pr_count=pr_heatmap_count,
-#             image_count=image_count
-#         )
-#     return True
+    save_predictions(
+        export_path=out_path,
+        res=res,
+        transform=global_transform,
+        crs=target_crs,
+        pr_heatmap=heatmap_mean,
+        pr_segment=segment_mean,
+        pr_count=count_arr,
+        image_count=count_arr,
+    )
+    return True

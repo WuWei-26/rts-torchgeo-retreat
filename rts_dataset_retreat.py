@@ -860,11 +860,11 @@ class MeanTPI(RasterDataset):
 class TestLandsat8SR(Landsat8SR):
     # sample: S2B_L2A_20190225_N0211_R117_6Bands_S1.tif
     filename_glob = "LANDSAT_*.tif"
-    filename_regex = r"^LANDSAT_(?:LC08|LC09|LC08_LC09)_C02_T1_L2_(?:LC08|LC09|LC08_LC09)_\d{6}_(?P<date>\d{4})\d{4}.*\.tif$"
+    filename_regex = r"^LANDSAT_(?:LC08|LC09|LC08_LC09)_C02_T1_L2_(?:LC08|LC09|LC08_LC09)_\d{6}_(?P<date>\d{8}).*\.tif$"
     # filename_regex = r"^S2.{5}_(?P<date>\d{8})_N\d{4}_R\d{3}_6Bands_S\d{1}"
     # filename_regex = r"^LANDSAT_LC08_C02_T1_L2_LC08_\d{6}_(?P<date>\d{4}).+"
     # filename_regex = L89_REGEX
-    # date_format = "%Y"
+    date_format = "%Y%m%d"
     is_image = True
     separate_files = False
     all_bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
@@ -909,69 +909,24 @@ class TestLandsat8SR(Landsat8SR):
                 "Testing for separated files are not supported yet"
             )
         super().__init__(root, crs, res, bands, transforms, cache)
+    
+    def _reindex_by_directory_year(self):
+        """推理版本：不排除 /test/ 目录"""
+        new_index = Index(interleaved=False, properties=Property(dimension=3))
+        for item in self.index.intersection(self.index.bounds, objects=True):
+            filepath = item.object
+            dir_year = self._extract_dir_year(filepath)
+            if dir_year is None:
+                new_index.insert(item.id, item.bounds, filepath)
+                continue
+            old_bounds = item.bounds
+            minx, maxx, miny, maxy = old_bounds[0], old_bounds[1], old_bounds[2], old_bounds[3]
+            mint = datetime(dir_year, 1, 1, 0, 0, 0).timestamp()
+            maxt = datetime(dir_year+1, 1, 1, 0, 0, 0).timestamp()
+            new_index.insert(item.id, (minx, maxx, miny, maxy, mint, maxt), filepath)
+        self.index = new_index
+        print(f"[{self.__class__.__name__}] Reindexed {new_index.get_size()} files by directory year")
 
-    # def __getitem__(self, query: Dict[str, Any]) -> Dict[str, Any]:
-    #     """Retrieve image/mask and metadata indexed by query.
-
-    #     Args:
-    #         query: (minx, maxx, miny, maxy, mint, maxt) coordinates to index
-
-    #     Returns:
-    #         sample of image/mask and metadata at that index
-
-    #     Raises:
-    #         IndexError: if query is not found in the index
-    #     """
-    #     bbox: BoundingBox = query["bbox"]
-    #     filepath = query["path"]
-
-    #     hits = self.index.intersection(tuple(bbox), objects=True)
-    #     filepaths = cast(List[str], [hit.object for hit in hits])
-
-    #     if filepath not in filepaths:
-    #         raise IndexError(
-    #             f"query: {bbox} not found in index with bounds: {self.bounds}"
-    #         )
-
-    #     if self.cache:
-    #         vrt_fh = self._cached_load_warp_file(filepath)
-    #     else:
-    #         vrt_fh = self._load_warp_file(filepath)
-
-    #     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-    #     band_indexes = self.band_indexes
-
-    #     src = vrt_fh
-    #     out_width = round((bbox.maxx - bbox.minx) / self.res[0])
-    #     out_height = round((bbox.maxy - bbox.miny) / self.res[1])
-    #     # out_width = math.ceil((bbox.maxx - bbox.minx) / self.res)
-    #     # out_height = math.ceil((bbox.maxy - bbox.miny) / self.res)
-    #     count = len(band_indexes) if band_indexes else src.count
-    #     out_shape = (count, out_height, out_width)
-    #     dest = src.read(
-    #         indexes=band_indexes,
-    #         out_shape=out_shape,
-    #         window=from_bounds(*bounds, src.transform),
-    #     )
-
-    #     # fix numpy dtypes which are not supported by pytorch tensors
-    #     if dest.dtype == np.uint16:
-    #         dest = dest.astype(np.int32)
-    #     elif dest.dtype == np.uint32:
-    #         dest = dest.astype(np.int64)
-
-    #     tensor = torch.tensor(dest)  # .float()
-
-    #     sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
-    #     if self.is_image:
-    #         sample["image"] = tensor.float()
-    #     else:
-    #         sample["mask"] = tensor  # .float() #long() # modified zyzhao
-
-    #     if self.transforms is not None:
-    #         sample = self.transforms(sample)
-
-    #     return sample
 
     def __getitem__(self, query):
 
@@ -988,23 +943,6 @@ class TestLandsat8SR(Landsat8SR):
         hits = self.index.intersection(tuple(bbox), objects=True)
         filepaths = cast(List[str], [hit.object for hit in hits])
         #  filepaths = [hit.object for hit in hits]
-
-        # 自动补齐或校验 path
-        # if filepath is None:
-        #     if not filepaths:
-        #         raise IndexError(f"query: {bbox} not found in index with bounds: {self.bounds}")
-        #     filepath = filepaths[0]
-        # else:
-        #     if filepath not in filepaths:
-        #         raise IndexError(f"query: {bbox} not found in index with bounds: {self.bounds}")
-
-        # 二次按 year 过滤（严格匹配 regex 中的 date）
-        # if year is not None:
-        #     rgx = re.compile(self.filename_regex, re.VERBOSE)
-        #     filepaths = [
-        #         fp for fp in filepaths
-        #         if (m := rgx.match(os.path.basename(fp))) and m.groupdict().get("date") == str(year)
-        #     ]
 
         if not filepaths:
             raise IndexError(f"bbox: {bbox} not found in index bounds: {self.bounds}")
@@ -1058,8 +996,9 @@ class TestLandsat8SR(Landsat8SR):
 class TestLandsat5SR(TestLandsat8SR):
     # sample: LANDSAT_LC08_C02_T1_L2_LC08_137036_20160810_Cloud_04.tif
     filename_glob = "LANDSAT_LT05_C02_T1_L2_*.tif"
-    filename_regex = L5_REGEX
-    date_format = "%Y"  # only acquire year information
+    # filename_regex = L5_REGEX
+    filename_regex = r"^LANDSAT_(?:LT05|LE07|LT05_LE07)_C02_T1_L2_(?:LT05|LE07|LT05_LE07)_\d{6}_(?P<date>\d{8}).*\.tif$"
+    date_format = "%Y%m%d"  # only acquire year information
     is_image = True
     separate_files = False
     all_bands = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"]
