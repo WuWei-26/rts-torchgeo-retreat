@@ -228,137 +228,194 @@ def show_results(image, heatmap, bright=3):
     plt.tight_layout()
     plt.show()
 
-# def predict_and_export(
-#         rts_model,
-#         trainer: pl.Trainer,
-#         datamodule,
-#         model_name: str,
-#         date_str: str,
-#         export_dir: Path,
+# def predict_and_export_georef(
+#     rts_model, trainer, datamodule,
+#     model_name, date_str, export_dir,
 # ):
+#     from rasterio.transform import from_origin
+
 #     predict_dataloader = datamodule.predict_dataloader()
 #     target_bbox = datamodule.roi
-#     res=30
+
+#     # ✅ 从推理影像文件直接获取标准网格
+#     landsat_path = datamodule.dataset.img_ds.index.intersection(
+#         datamodule.dataset.img_ds.index.bounds, objects=True
+#     )
+#     # 更简单：从第一个batch获取path_t然后打开文件
+#     first_batch = next(iter(predict_dataloader))
+#     path_t = first_batch.get("path_t")
+#     if isinstance(path_t, (list, tuple)):
+#         path_t = path_t[0]
+
+#     with rasterio.open(path_t) as src:
+#         ls_transform = src.transform   # origin=(438075, 3930075), res=30
+#         ls_crs = src.crs
+#         print(f"Landsat transform: {ls_transform}")
+
+#     res_x = ls_transform.a
+#     res_y = abs(ls_transform.e)
+#     roi_origin_x = ls_transform.c
+#     roi_origin_y = ls_transform.f
+
+#     H = int(round((target_bbox.maxy - target_bbox.miny) / res_y))
+#     W = int(round((target_bbox.maxx - target_bbox.minx) / res_x))
+#     global_transform = rasterio.transform.Affine(
+#         res_x, 0, roi_origin_x,
+#         0, -res_y, roi_origin_y
+#     )
+#     print(f"整图尺寸: {H}x{W}, transform: {global_transform}")
+
+#     heatmap_sum = np.zeros((H, W), dtype=np.float32)
+#     segment_sum = np.zeros((H, W), dtype=np.float32)
+#     count_arr   = np.zeros((H, W), dtype=np.float32)
+#     target_crs  = ls_crs
 
 #     predictions_list = trainer.predict(
 #         model=rts_model, dataloaders=predict_dataloader
 #     )
 
-#     pr_heatmap_sum = None
-#     pr_segment_sum = None
-#     image_count = None
-#     target_crs = None
-#     target_transform = None
-
 #     for data_batch, predictions in zip(predict_dataloader, predictions_list):
-#         pr_heatmaps = predictions['heatmap']     # [B,1,H,W]
-#         pr_segments = predictions['prob_mask']   # [B,1,H,W]
-#         image_batch = data_batch['image_t']      # [B,C,H,W]
+#         pr_heatmap = predictions['heatmap'][0, 0].numpy()
+#         pr_segment = predictions['prob_mask'][0, 0].numpy()
+#         image_t    = data_batch['image_t'][0]
 
-#         idx = 0  # batch_size = 1
-#         image = image_batch[idx]           # [C,H,W]
-#         pr_heatmap = pr_heatmaps[idx, 0]   # [H,W]
-#         pr_segment = pr_segments[idx, 0]   # [H,W]
-        
 #         data_bbox = data_batch['bbox']
 #         if isinstance(data_bbox, (list, tuple)):
-#             data_bbox = data_bbox[idx]
-        
-#         target_crs = data_batch['crs']
-#         if isinstance(target_crs, (list, tuple)):
-#             target_crs = target_crs[idx]
+#             data_bbox = data_bbox[0]
 
-#         if target_transform is None:
-#             from rasterio.transform import from_origin
-#             import math
-#             # snap target_bbox origin 到数据网格
-#             snap_minx = math.floor(target_bbox.minx / res) * res
-#             snap_maxy = math.ceil(target_bbox.maxy / res) * res
-#             target_transform = from_origin(snap_minx, snap_maxy, res, res)
+#         # ✅ snap到Landsat网格
+#         col_off = int(round((data_bbox.minx - roi_origin_x) / res_x))
+#         row_off = int(round((roi_origin_y - data_bbox.maxy) / res_y))
 
-#         # 展开到整图坐标
-#         pr_heatmap_exp, pr_segment_exp, image_mask_exp = expand_and_mask(
-#             image, pr_heatmap, pr_segment, data_bbox, target_bbox, res=30
-#         )
+#         patch_h, patch_w = pr_heatmap.shape
+#         row_end = min(row_off + patch_h, H)
+#         col_end = min(col_off + patch_w, W)
+#         patch_h_clip = row_end - row_off
+#         patch_w_clip = col_end - col_off
 
-#         def to_2d_numpy(arr):
-#             """将数组转换为 2D numpy 数组"""
-#             if hasattr(arr, 'filled'):
-#                 arr = arr.filled(0)
-#             if hasattr(arr, 'numpy'):
-#                 arr = arr.numpy()
-#             arr = np.array(arr, dtype=np.float32)
-#             while arr.ndim > 2:
-#                 arr = arr.squeeze(0)
-#             return arr
-        
-#         pr_heatmap_np = to_2d_numpy(pr_heatmap_exp)
-#         pr_segment_np = to_2d_numpy(pr_segment_exp)
-#         image_mask_np = to_2d_numpy(image_mask_exp)
+#         if row_off < 0 or col_off < 0 or patch_h_clip <= 0 or patch_w_clip <= 0:
+#             continue
 
-#         if pr_heatmap_sum is None:
-#             pr_heatmap_sum = np.zeros_like(pr_heatmap_np, dtype=np.float32)
-#             pr_segment_sum = np.zeros_like(pr_segment_np, dtype=np.float32)
-#             image_count = np.zeros_like(pr_heatmap_np, dtype=np.float32)
+#         valid = (image_t[0, :patch_h_clip, :patch_w_clip].numpy() != 0)
+#         heatmap_sum[row_off:row_end, col_off:col_end][valid] += pr_heatmap[:patch_h_clip, :patch_w_clip][valid]
+#         segment_sum[row_off:row_end, col_off:col_end][valid] += pr_segment[:patch_h_clip, :patch_w_clip][valid]
+#         count_arr  [row_off:row_end, col_off:col_end][valid] += 1
 
-#         valid_mask = image_mask_np > 0
-#         pr_heatmap_sum[valid_mask] += pr_heatmap_np[valid_mask]
-#         pr_segment_sum[valid_mask] += pr_segment_np[valid_mask]
-#         image_count[valid_mask] += 1
+#     safe_count = np.maximum(count_arr, 1)
+#     heatmap_mean = heatmap_sum / safe_count
+#     segment_mean = segment_sum / safe_count
+#     heatmap_mean[count_arr == 0] = 0
+#     segment_mean[count_arr == 0] = 0
 
-#     image_count_safe = np.maximum(image_count, 1)
-#     pr_heatmap_mean = pr_heatmap_sum / image_count_safe
-#     pr_segment_mean = pr_segment_sum / image_count_safe
-
-#     pr_heatmap_mean[image_count == 0] = 0
-#     pr_segment_mean[image_count == 0] = 0
+#     segment_binary = (segment_mean > 0.5).astype(np.float32)
+#     heatmap_mean   = heatmap_mean * segment_binary
 
 #     export_dir.mkdir(parents=True, exist_ok=True)
-
-#     print("pr_heatmap_mean shape:", pr_heatmap_mean.shape)
-#     print(f"image_count 范围: [{image_count.min()}, {image_count.max()}]")
-
-#     pr_tiff_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
+#     out_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
 
 #     save_predictions(
-#         export_path=pr_tiff_path,
-#         res=res,
-#         transform=target_transform,
+#         export_path=out_path,
+#         res=int(res_x),
+#         transform=global_transform,
 #         crs=target_crs,
-#         pr_heatmap=pr_heatmap_mean,
-#         pr_segment=pr_segment_mean,
-#         pr_count=pr_segment_sum,
-#         image_count=image_count,
+#         pr_heatmap=heatmap_mean,
+#         pr_segment=segment_mean,
+#         pr_count=count_arr,
+#         image_count=count_arr,
 #     )
-    
-#     print(f"Successfully exported to: {pr_tiff_path}")
 #     return True
 
 def predict_and_export_georef(
     rts_model, trainer, datamodule,
-    model_name, date_str, export_dir
+    model_name, date_str, export_dir,
+    aggregation_method='median',
 ):
+    from rasterio.transform import from_origin
+
     predict_dataloader = datamodule.predict_dataloader()
     target_bbox = datamodule.roi
-    res = 30  # ✅ 明确定义
 
-    H = int(round((target_bbox.maxy - target_bbox.miny) / res))
-    W = int(round((target_bbox.maxx - target_bbox.minx) / res))
+    # ✅ 直接从Landsat影像文件获取标准网格，不依赖第一个batch
+    # 找year_t对应的影像文件
+    from datetime import datetime
+    year_t = datamodule.year_t
+    year_mint = datetime(year_t, 1, 1).timestamp()
+    year_maxt = datetime(year_t + 1, 1, 1).timestamp()
+    bbox_year_t = BoundingBox(
+        target_bbox.minx, target_bbox.maxx,
+        target_bbox.miny, target_bbox.maxy,
+        year_mint, year_maxt
+    )
+
+    # 从img_dataset里找year_t的文件
+    def collect_leaf_datasets(ds):
+        from torchgeo.datasets import UnionDataset
+        if isinstance(ds, UnionDataset):
+            result = []
+            for sub in ds.datasets:
+                result.extend(collect_leaf_datasets(sub))
+            return result
+        return [ds]
+
+    all_ds = collect_leaf_datasets(datamodule.img_dataset)
+    year_t_ds = [
+        ds for ds in all_ds
+        if ds.bounds.mint <= year_mint and ds.bounds.maxt >= year_maxt
+    ]
+
+    landsat_path = None
+    for ds in year_t_ds:
+        hits = list(ds.index.intersection(tuple(bbox_year_t), objects=True))
+        if hits:
+            landsat_path = hits[0].object
+            break
+
+    if landsat_path is None:
+        raise ValueError(f"找不到year_t={year_t}对应的Landsat影像文件")
+
+    with rasterio.open(landsat_path) as src:
+        ls_transform = src.transform
+        ls_crs = src.crs
+        print(f"Landsat文件: {landsat_path}")
+        print(f"Landsat transform: {ls_transform}")
+
+    res_x = ls_transform.a
+    res_y = abs(ls_transform.e)
+    roi_origin_x = ls_transform.c  # 整个影像文件的origin
+    roi_origin_y = ls_transform.f
+    target_crs = ls_crs
+
+    H = int(round((target_bbox.maxy - target_bbox.miny) / res_y))
+    W = int(round((target_bbox.maxx - target_bbox.minx) / res_x))
+    
+    # ✅ target_bbox相对于Landsat文件origin的偏移
+    col_start = int(round((target_bbox.minx - roi_origin_x) / res_x))
+    row_start = int(round((roi_origin_y - target_bbox.maxy) / res_y))
+    
+    # 输出文件的origin = 文件origin + ROI偏移
+    out_origin_x = roi_origin_x + col_start * res_x
+    out_origin_y = roi_origin_y - row_start * res_y
+    global_transform = rasterio.transform.Affine(
+        res_x, 0, out_origin_x,
+        0, -res_y, out_origin_y
+    )
+    print(f"image size: {H}x{W}")
+    print(f"output transform: {global_transform}")
 
     heatmap_sum = np.zeros((H, W), dtype=np.float32)
     segment_sum = np.zeros((H, W), dtype=np.float32)
     count_arr   = np.zeros((H, W), dtype=np.float32)
 
-    from rasterio.transform import from_origin
-    global_transform = from_origin(
-        target_bbox.minx, target_bbox.maxy, res, res
-    )
-    target_crs = None
+    # 🔧 使用字典存储多个预测值（更高效）
+    heatmap_dict = {}  # (i, j) -> [值1, 值2, ...]
+    segment_dict = {}
+    count_arr = np.zeros((H, W), dtype=np.float32)
 
     predictions_list = trainer.predict(
         model=rts_model, dataloaders=predict_dataloader
     )
 
+    batch_idx = 0
     for data_batch, predictions in zip(predict_dataloader, predictions_list):
         pr_heatmap = predictions['heatmap'][0, 0].numpy()
         pr_segment = predictions['prob_mask'][0, 0].numpy()
@@ -368,43 +425,78 @@ def predict_and_export_georef(
         if isinstance(data_bbox, (list, tuple)):
             data_bbox = data_bbox[0]
 
-        if target_crs is None:
-            target_crs = data_batch['crs']
-            if isinstance(target_crs, (list, tuple)):
-                target_crs = target_crs[0]
+        col_off = int(round((data_bbox.minx - out_origin_x) / res_x))
+        row_off = int(round((out_origin_y - data_bbox.maxy) / res_y))
 
-        col_off = int(round((data_bbox.minx - target_bbox.minx) / res))
-        row_off = int(round((target_bbox.maxy - data_bbox.maxy) / res))
         patch_h, patch_w = pr_heatmap.shape
-
         row_end = min(row_off + patch_h, H)
         col_end = min(col_off + patch_w, W)
         patch_h_clip = row_end - row_off
         patch_w_clip = col_end - col_off
 
         if row_off < 0 or col_off < 0 or patch_h_clip <= 0 or patch_w_clip <= 0:
+            batch_idx += 1
             continue
 
         valid = (image_t[0, :patch_h_clip, :patch_w_clip].numpy() != 0)
-        heatmap_sum[row_off:row_end, col_off:col_end][valid] += pr_heatmap[:patch_h_clip, :patch_w_clip][valid]
-        segment_sum[row_off:row_end, col_off:col_end][valid] += pr_segment[:patch_h_clip, :patch_w_clip][valid]
-        count_arr  [row_off:row_end, col_off:col_end][valid] += 1
+        
+        # 🔧 将有效像素存储到字典中
+        valid_indices = np.where(valid)
+        for local_i, local_j in zip(valid_indices[0], valid_indices[1]):
+            global_i = row_off + local_i
+            global_j = col_off + local_j
+            
+            key = (global_i, global_j)
+            if key not in heatmap_dict:
+                heatmap_dict[key] = []
+                segment_dict[key] = []
+            
+            heatmap_dict[key].append(pr_heatmap[local_i, local_j])
+            segment_dict[key].append(pr_segment[local_i, local_j])
+            count_arr[global_i, global_j] += 1
+        
+        batch_idx += 1
+        if batch_idx % 10 == 0:
+            print(f" {batch_idx} batches processed, currently storing {len(heatmap_dict)} pixels")
+    
+    heatmap_result = np.zeros((H, W), dtype=np.float32)
+    segment_result = np.zeros((H, W), dtype=np.float32)
+    
+    if aggregation_method == 'median':
+        print("using median aggregation")
+        for (i, j), values in heatmap_dict.items():
+            heatmap_result[i, j] = np.median(values)
+        for (i, j), values in segment_dict.items():
+            segment_result[i, j] = np.median(values)
+            
+    elif aggregation_method == 'mean':
+        print("using mean aggregation")
+        for (i, j), values in heatmap_dict.items():
+            heatmap_result[i, j] = np.mean(values)
+        for (i, j), values in segment_dict.items():
+            segment_result[i, j] = np.mean(values)
+    else:
+        raise ValueError(f"Unknown aggregation_method: {aggregation_method}")
 
-    safe_count = np.maximum(count_arr, 1)
-    heatmap_mean = heatmap_sum / safe_count
-    segment_mean = segment_sum / safe_count
+    heatmap_mean = heatmap_result
+    segment_mean = segment_result
+
+    # 掩膜无数据区域
     heatmap_mean[count_arr == 0] = 0
     segment_mean[count_arr == 0] = 0
 
     segment_binary = (segment_mean > 0.5).astype(np.float32)
-    heatmap_mean = heatmap_mean * segment_binary
-    
+    heatmap_mean   = heatmap_mean * segment_binary
+
     export_dir.mkdir(parents=True, exist_ok=True)
-    out_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
+    out_path = export_dir / f"pr_mask_{date_str}_{aggregation_method}_{model_name}.tif"
+
+    print(f"  - heatmap range: [{heatmap_mean.min():.4f}, {heatmap_mean.max():.4f}]")
+    print(f"  - segment range: [{segment_mean.min():.4f}, {segment_mean.max():.4f}]")
 
     save_predictions(
         export_path=out_path,
-        res=res,
+        res=int(res_x),
         transform=global_transform,
         crs=target_crs,
         pr_heatmap=heatmap_mean,
@@ -413,3 +505,55 @@ def predict_and_export_georef(
         image_count=count_arr,
     )
     return True
+
+    # batch_idx = 0
+    # for data_batch, predictions in zip(predict_dataloader, predictions_list):
+    #     pr_heatmap = predictions['heatmap'][0, 0].numpy()
+    #     pr_segment = predictions['prob_mask'][0, 0].numpy()
+    #     image_t    = data_batch['image_t'][0]
+
+    #     data_bbox = data_batch['bbox']
+    #     if isinstance(data_bbox, (list, tuple)):
+    #         data_bbox = data_bbox[0]
+
+    #     # ✅ 相对于输出图像origin计算偏移
+    #     col_off = int(round((data_bbox.minx - out_origin_x) / res_x))
+    #     row_off = int(round((out_origin_y - data_bbox.maxy) / res_y))
+
+    #     patch_h, patch_w = pr_heatmap.shape
+    #     row_end = min(row_off + patch_h, H)
+    #     col_end = min(col_off + patch_w, W)
+    #     patch_h_clip = row_end - row_off
+    #     patch_w_clip = col_end - col_off
+
+    #     if row_off < 0 or col_off < 0 or patch_h_clip <= 0 or patch_w_clip <= 0:
+    #         continue
+
+    #     valid = (image_t[0, :patch_h_clip, :patch_w_clip].numpy() != 0)
+    #     heatmap_sum[row_off:row_end, col_off:col_end][valid] += pr_heatmap[:patch_h_clip, :patch_w_clip][valid]
+    #     segment_sum[row_off:row_end, col_off:col_end][valid] += pr_segment[:patch_h_clip, :patch_w_clip][valid]
+    #     count_arr  [row_off:row_end, col_off:col_end][valid] += 1
+
+    # safe_count = np.maximum(count_arr, 1)
+    # heatmap_mean = heatmap_sum / safe_count
+    # segment_mean = segment_sum / safe_count
+    # heatmap_mean[count_arr == 0] = 0
+    # segment_mean[count_arr == 0] = 0
+
+    # segment_binary = (segment_mean > 0.5).astype(np.float32)
+    # heatmap_mean   = heatmap_mean * segment_binary
+
+    # export_dir.mkdir(parents=True, exist_ok=True)
+    # out_path = export_dir / f"pr_mask_{date_str}_mean_{model_name}.tif"
+
+    # save_predictions(
+    #     export_path=out_path,
+    #     res=int(res_x),
+    #     transform=global_transform,
+    #     crs=target_crs,
+    #     pr_heatmap=heatmap_mean,
+    #     pr_segment=segment_mean,
+    #     pr_count=count_arr,
+    #     image_count=count_arr,
+    # )
+    # return True

@@ -484,12 +484,22 @@ class LandsatDataModule(pl.LightningDataModule):
             collate_fn=stack_samples,
         )
 
+    # def on_after_batch_transfer(self, batch, dataloader_idx):
+    #     # only perform augmentation during training
+    #     if self.trainer and self.trainer.training:
+    #         batch = self.augmentation(batch)
+    #     batch = self.normalize(batch)
+    #     return batch
     def on_after_batch_transfer(self, batch, dataloader_idx):
-        # only perform augmentation during training
-        if self.trainer and self.trainer.training:
-            # perform GPU/Batched data augmentation
-            batch = self.augmentation(batch)
+        # 推理阶段不做增广：仅归一化成对影像
         batch = self.normalize(batch)
+        
+        # 🔧 调试：验证 transform 是否存在
+        if batch.get("transform_t") is None:
+            print("⚠️ WARNING: transform_t 为 None，推理结果可能无法正确地理参考！")
+        else:
+            print(f"✅ transform_t: {batch['transform_t']}")
+        
         return batch
 
     def transfer_batch_to_device(
@@ -736,19 +746,6 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             img_dir, [year_t, year_tm1], bands_l89, bands_l57, crs, res, use_l7
         )
 
-        # ds_l89 = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
-        # if use_l7:
-        #     ds_l57 = TestLandsat57SR(root=img_dir, crs=crs, bands=bands_l57, res=res, cache=False)
-        #     self.img_dataset = UnionDataset(ds_l89, ds_l57)
-        #     stats_ds = ds_l89
-        # else:
-        #     self.img_dataset = ds_l89
-        #     stats_ds = ds_l89
-
-        # ✅ 只创建一个用于获取统计信息的数据集，不覆盖 self.img_dataset
-        # stats_ds = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
-
-        # ✅ 仅用于获取统计信息（均值/标准差），不覆盖 self.img_dataset
         try:
             stats_ds = TestLandsat8SR(root=img_dir, crs=crs, bands=bands_l89, res=res, cache=False)
         except Exception:
@@ -778,9 +775,6 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             self.dem_dataset = None
             ds_for_pair = self.img_dataset  # 仅影像
 
-        # 成对推理数据集：只读影像与 DEM，不读标签
-        # 复用训练版的成对数据集 RTSTemporalPairDataset 也可，但推理时通常不需要 heatmap/mask/retreat_map
-        # 这里直接用训练版 RTSTemporalPairDataset，只取 image_t/image_tm1/dem_t/dem_tm1 键（Transforms 成对预处理）
         self.dataset = RTSTemporalPairDataset(
             img_ds=self.img_dataset,       # 用原影像数据集（TestLandsat* 支持 path）
             mask_ds=None,                  # 推理不需要标签；RTSTemporalPairDataset需改为允许 None（或用你前面提供的 PairTemporalDataset）
@@ -917,7 +911,11 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
         tensor_keys = ["image_t", "image_tm1", "dem_t", "dem_tm1"]
         
         # 定义需要保留在CPU的元数据字段
-        metadata_keys = ["bbox", "path", "crs", "image"]
+        # metadata_keys = ["bbox", "path", "crs", "image"]
+        metadata_keys = ["bbox", "path", "crs", "image",
+                     "path_t", "path_tm1",
+                     "transform_t", "transform_tm1",  # ← 加这两个
+                     "year_t", "year_tm1"]
         
         # 创建新的批次字典
         new_batch = {}
@@ -935,19 +933,38 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
         return new_batch
     
     def predict_dataloader(self):
+        # def collate_single_sample(batch):
+        #     """每个样本单独处理，不堆叠（因为尺寸可能不同）"""
+        #     # batch 是一个列表，每个元素是一个 sample dict
+        #     # 由于 batch_size=1，直接返回第一个元素
+        #     if len(batch) == 1:
+        #         sample = batch[0]
+        #         # 为张量添加 batch 维度
+        #         for key in ["image_t", "image_tm1", "dem_t", "dem_tm1"]:
+        #             if key in sample and torch.is_tensor(sample[key]):
+        #                 sample[key] = sample[key].unsqueeze(0)  # [C,H,W] -> [1,C,H,W]
+        #         return sample
+        #     else:
+        #         # 如果 batch_size > 1，使用 stack_samples（但要求尺寸相同）
+        #         return stack_samples(batch)
         def collate_single_sample(batch):
             """每个样本单独处理，不堆叠（因为尺寸可能不同）"""
-            # batch 是一个列表，每个元素是一个 sample dict
-            # 由于 batch_size=1，直接返回第一个元素
             if len(batch) == 1:
                 sample = batch[0]
                 # 为张量添加 batch 维度
                 for key in ["image_t", "image_tm1", "dem_t", "dem_tm1"]:
                     if key in sample and torch.is_tensor(sample[key]):
                         sample[key] = sample[key].unsqueeze(0)  # [C,H,W] -> [1,C,H,W]
+                
+                # 🔧 关键：保留 transform 信息（添加到列表中，即使只有1个样本）
+                for key in ["transform_t", "transform_tm1", "bbox", "path_t", "path_tm1", "crs", "year_t", "year_tm1"]:
+                    if key in sample:
+                        # 对于标量/对象，用列表包装以保持一致性
+                        if not isinstance(sample[key], (list, tuple)):
+                            sample[key] = [sample[key]]
+                
                 return sample
             else:
-                # 如果 batch_size > 1，使用 stack_samples（但要求尺寸相同）
                 return stack_samples(batch)
 
         return DataLoader(

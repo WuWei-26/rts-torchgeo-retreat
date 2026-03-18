@@ -256,7 +256,7 @@ class SiameseRTS(pl.LightningModule):
         self.loss_fn_ret = LossWeightedMSE(W=20) # retreat map mse; loss origional=10
 
         self.loss_weight_dice = nn.Parameter(torch.tensor(1.0), requires_grad=False)
-        self.loss_weight_focal = nn.Parameter(torch.tensor(10.0), requires_grad=False) # 20.0
+        self.loss_weight_focal = nn.Parameter(torch.tensor(20.0), requires_grad=False) # 20.0
         self.loss_weight_mse = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_area = nn.Parameter(torch.tensor(1.0), requires_grad=False)
         self.loss_weight_retreat = nn.Parameter(torch.tensor(1.0), requires_grad=False)
@@ -366,6 +366,20 @@ class SiameseRTS(pl.LightningModule):
 
         return {"logits_mask": logits_mask, "heatmap": heatmap, "retreat": retreat_map}
 
+        # # -------- priority 2 --------------------------------
+        # logits_mask = self.seg_head(merged)    # [B,1,H,W]
+        # prob_mask = torch.sigmoid(logits_mask)
+        # heatmap_raw = self.heat_head(merged)
+        # heatmap = heatmap_raw * prob_mask
+        # retreat_map = self.retreat_head(merged)
+
+        # return {
+        #     "logits_mask": logits_mask,
+        #     "heatmap": heatmap,
+        #     "retreat": retreat_map
+        # }
+        # # ----------------------------------------------------
+
     # ========== 训练/验证/Test 步骤：与原版一致但扩展到三任务 ==========
     def shared_step(self, batch, stage):
         if self.global_step < 3:
@@ -438,6 +452,28 @@ class SiameseRTS(pl.LightningModule):
         loss_area  = self.loss_fn_area(
             torch.where(mask_heat, pred_heat, torch.zeros_like(pred_heat)),
             torch.where(mask_heat, gt_heatmap, torch.zeros_like(gt_heatmap)))
+
+
+        # #--------------------priority 1-----------------------------
+
+        # mask = ensure_ch1(batch["mask"]).float()
+        # valid_heat = mask_heat & (mask > 0) # train only on slump + valid heatmap pixels
+
+        # heat_weight = 1.0 + 8.0 * gt_heatmap
+        # # weighted MSE
+        # heat_error = (pred_heat - gt_heatmap) ** 2
+
+        # loss_heat = torch.mean(
+        #     heat_weight[valid_heat] * heat_error[valid_heat]
+        # )
+
+        # # 4) 保留 area consistency loss
+        # loss_area = self.loss_fn_area(
+        #     torch.where(valid_heat, pred_heat, torch.zeros_like(pred_heat)),
+        #     torch.where(valid_heat, gt_heatmap, torch.zeros_like(gt_heatmap))
+        # )
+
+        # #-------------------------------------------------
 
         # 1) 处理无效像素（NaN/Inf）
         valid_pix = torch.isfinite(gt_retreat)

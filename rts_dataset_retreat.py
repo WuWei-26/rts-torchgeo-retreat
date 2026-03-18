@@ -169,7 +169,6 @@ class Landsat8SR(RasterDataset):
         ]
         
         if matched_files:
-            # ✅ 优先选合成影像
             COMPOSITE_KEYWORDS = ["geometric_median", "median", "medoid", "mosaic"]
             composite_files = [
                 fp for fp in matched_files
@@ -177,7 +176,6 @@ class Landsat8SR(RasterDataset):
             ]
             filepath = composite_files[0] if composite_files else matched_files[0]
         else:
-            # 如果没有精确匹配年份的文件，报错而不是使用错误的文件
             available_years = sorted(set(self._extract_dir_year(fp) for fp in filepaths if self._extract_dir_year(fp)))
             raise IndexError(
                 f"No file found for year {query_year}. "
@@ -215,16 +213,12 @@ class Landsat8SR(RasterDataset):
             dest = dest.astype(np.int32)
         elif dest.dtype == np.uint32:
             dest = dest.astype(np.int64)
-        
-        # ✅ 新增：全零检测，说明 bbox 不在该文件有效覆盖范围内
-        # if dest.sum() == 0:
-        #     raise IndexError(
-        #         f"All-zero image for year={query_year}, "
-        #         f"file={os.path.basename(filepath)}, bbox={bbox}"
-        #     )
+
+        window = from_bounds(*bounds, src.transform)
+        transform = src.window_transform(window)
 
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
+        sample = {"crs": self.crs, "bbox": bbox, "path": filepath, "transform": transform}
         
         if self.is_image:
             sample["image"] = tensor.float()
@@ -481,7 +475,7 @@ class RtsMask(Landsat8SR):
             nz = lambda t: int((t > 0).sum().item())
             print(f"  output shape={tuple(data.shape)}, nz heat/seg/ret=({nz(data[0])}, {nz(data[1])}, {nz(data[2])})")
 
-        sample = {"crs": self.crs, "bbox": bbox, "mask": data}
+        sample = {"crs": self.crs, "bbox": bbox, "mask": data, "transform": self._cached_load_warp_file(filepaths[0]).transform}
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
@@ -602,50 +596,105 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
         self.year_t = year_t
         self.year_tm1 = year_tm1
 
+    # def _get_image_by_year(self, bbox: BoundingBox, year: int) -> dict:
+    #     """
+    #     根据年份选择正确的子数据集获取图像。
+    #     - year > 2012: 优先使用 Landsat8SR
+    #     - year <= 2012: 优先使用 Landsat57SR
+        
+    #     如果 img_ds 是 UnionDataset，则遍历子数据集；
+    #     否则直接调用 img_ds[bbox]。
+    #     """
+    #     from torchgeo.datasets import UnionDataset
+        
+    #     # 如果不是 UnionDataset，直接查询
+    #     if not isinstance(self.img_ds, UnionDataset):
+    #         return self.img_ds[bbox]
+        
+    #     # 根据年份确定优先级
+    #     if year > 2012:
+    #         # 优先 Landsat8SR，然后 Landsat57SR
+    #         preferred_types = (Landsat8SR, Landsat57SR)
+    #     else:
+    #         # 优先 Landsat57SR，然后 Landsat8SR
+    #         preferred_types = (Landsat57SR, Landsat8SR)
+        
+    #     last_error = None
+        
+    #     # 按优先级尝试各个子数据集
+    #     for preferred_type in preferred_types:
+    #         for ds in self.img_ds.datasets:
+    #             if isinstance(ds, preferred_type):
+    #                 try:
+    #                     return ds[bbox]
+    #                 except IndexError as e:
+    #                     last_error = e
+    #                     continue
+        
+    #     # 如果所有优先类型都失败，尝试所有数据集
+    #     for ds in self.img_ds.datasets:
+    #         try:
+    #             return ds[bbox]
+    #         except IndexError as e:
+    #             last_error = e
+    #             continue
+        
+    #     # 全部失败，抛出最后一个错误
+    #     raise IndexError(
+    #         f"No image found for year {year}, bbox: {bbox}. Last error: {last_error}"
+    #     )
+
     def _get_image_by_year(self, bbox: BoundingBox, year: int) -> dict:
-        """
-        根据年份选择正确的子数据集获取图像。
-        - year > 2012: 优先使用 Landsat8SR
-        - year <= 2012: 优先使用 Landsat57SR
-        
-        如果 img_ds 是 UnionDataset，则遍历子数据集；
-        否则直接调用 img_ds[bbox]。
-        """
         from torchgeo.datasets import UnionDataset
-        
-        # 如果不是 UnionDataset，直接查询
+        from datetime import datetime
+
         if not isinstance(self.img_ds, UnionDataset):
             return self.img_ds[bbox]
-        
-        # 根据年份确定优先级
+
+        # ✅ 递归收集所有叶子数据集
+        def collect_leaf_datasets(ds):
+            if isinstance(ds, UnionDataset):
+                result = []
+                for sub in ds.datasets:
+                    result.extend(collect_leaf_datasets(sub))
+                return result
+            return [ds]
+
+        all_datasets = collect_leaf_datasets(self.img_ds)
+
+        # ✅ 按时间范围过滤，只保留覆盖目标年份的数据集
+        year_mint = datetime(year, 1, 1).timestamp()
+        year_maxt = datetime(year + 1, 1, 1).timestamp()
+        year_filtered = [
+            ds for ds in all_datasets
+            if ds.bounds.mint <= year_mint and ds.bounds.maxt >= year_maxt
+        ]
+
+        if not year_filtered:
+            year_filtered = all_datasets  # 回退
+
         if year > 2012:
-            # 优先 Landsat8SR，然后 Landsat57SR
             preferred_types = (Landsat8SR, Landsat57SR)
         else:
-            # 优先 Landsat57SR，然后 Landsat8SR
             preferred_types = (Landsat57SR, Landsat8SR)
-        
+
         last_error = None
-        
-        # 按优先级尝试各个子数据集
         for preferred_type in preferred_types:
-            for ds in self.img_ds.datasets:
+            for ds in year_filtered:
                 if isinstance(ds, preferred_type):
                     try:
                         return ds[bbox]
                     except IndexError as e:
                         last_error = e
                         continue
-        
-        # 如果所有优先类型都失败，尝试所有数据集
-        for ds in self.img_ds.datasets:
+
+        for ds in year_filtered:
             try:
                 return ds[bbox]
             except IndexError as e:
                 last_error = e
                 continue
-        
-        # 全部失败，抛出最后一个错误
+
         raise IndexError(
             f"No image found for year {year}, bbox: {bbox}. Last error: {last_error}"
         )
@@ -714,6 +763,8 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
             "path_tm1": s_img_tm1.get("path", ""),
             "year_t": year_t,
             "year_tm1": year_tm1,
+            "transform_t":   s_img_t.get("transform",   None),
+            "transform_tm1": s_img_tm1.get("transform", None),
         }
 
         if s_dem_t is not None:
@@ -837,9 +888,12 @@ class MeanTPI(RasterDataset):
             dest = dest.astype(np.int32)
         elif dest.dtype == np.uint32:
             dest = dest.astype(np.int64)
+
+        window = from_bounds(*bounds, src.transform)
+        transform = src.window_transform(window)
         
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath}
+        sample = {"crs": self.crs, "bbox": bbox, "mask": tensor.float(), "path": filepath, "transform": transform}
         
         if self.transforms is not None:
             sample = self.transforms(sample)
@@ -976,6 +1030,7 @@ class TestLandsat8SR(Landsat8SR):
             window=from_bounds(*bounds, src.transform),
         )
 
+
         # dtype 兼容
         if dest.dtype == np.uint16:
             dest = dest.astype(np.int32)
@@ -983,7 +1038,12 @@ class TestLandsat8SR(Landsat8SR):
             dest = dest.astype(np.int64)
 
         tensor = torch.tensor(dest)
-        sample = {"crs": self.crs, "bbox": bbox, "path": filepath}
+
+        window = from_bounds(*bounds, src.transform)
+        transform = src.window_transform(window)
+
+        sample = {"crs": self.crs, "bbox": bbox, "path": filepath, "transform": transform}
+
         if self.is_image:
             sample["image"] = tensor.float()
         else:
