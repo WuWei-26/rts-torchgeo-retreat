@@ -17,7 +17,74 @@ from torchgeo.datasets import BoundingBox, RasterDataset, unbind_samples
 AREA_K_SIZE = 100
 AREA_STRIDE = 10
 
+# def expand_to_bbox(image: Tensor, bbox: BoundingBox, t_bbox: BoundingBox, res: int):
+#     # out_width = round((t_bbox.maxx - t_bbox.minx) / res)
+#     # out_height = round((t_bbox.maxy - t_bbox.miny) / res)
+#     out_width = math.ceil((t_bbox.maxx - t_bbox.minx) / res)
+#     out_height = math.ceil((t_bbox.maxy - t_bbox.miny) / res)
+#     if image.shape[-2] == out_height and image.shape[-1] == out_width:
+#         # print('not expanded')
+#         return image
+#     # print(image.ndim)
+#     if image.ndim == 3:
+#         t_image = torch.zeros([image.shape[0], out_height, out_width])
+#     elif image.ndim == 2:
+#         t_image = torch.zeros([out_height, out_width])
+#     # print('input shape: ', image.shape)
+#     # print('target shape: ', t_image.shape)
+#     transform = transform_from_bounds(
+#         t_bbox.minx, t_bbox.miny, t_bbox.maxx, t_bbox.maxy, out_width, out_height
+#     )  # west, south, east, north, width, height
+#     bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+#     q_window = win_from_bounds(*bounds, transform)
+#     # print(q_window)
+#     row_slice, col_slice = window_index(q_window)
+#     # row_slice = slice(*row_slice.indices(image.shape[-2])) # to match size
+#     # col_slice = slice(*col_slice.indices(image.shape[-1])) # S.indices(len) -> (start, stop, stride)
+#     # to ensure matching the size
+#     row_slice_2 = slice(row_slice.start, row_slice.start + image.shape[-2])
+#     col_slice_2 = slice(col_slice.start, col_slice.start + image.shape[-1])
+#     if image.ndim == 3:
+#         t_image[:, row_slice_2, col_slice_2] = image
+#     elif image.ndim == 2:
+#         t_image[row_slice_2, col_slice_2] = image
+#     return t_image
 
+def expand_to_bbox(image: Tensor, bbox: BoundingBox, t_bbox: BoundingBox, res: int):
+    out_width = math.ceil((t_bbox.maxx - t_bbox.minx) / res)
+    out_height = math.ceil((t_bbox.maxy - t_bbox.miny) / res)
+    if image.shape[-2] == out_height and image.shape[-1] == out_width:
+        return image
+
+    if image.ndim == 3:
+        t_image = torch.zeros([image.shape[0], out_height, out_width], dtype=image.dtype)
+    else:
+        t_image = torch.zeros([out_height, out_width], dtype=image.dtype)
+
+    transform = transform_from_bounds(
+        t_bbox.minx, t_bbox.miny, t_bbox.maxx, t_bbox.maxy, out_width, out_height
+    ) # west, south, east, north, width, height
+    bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
+    q_window = win_from_bounds(*bounds, transform)
+
+    row_slice, col_slice = window_index(q_window)
+
+    # clip boundary
+    row_start = max(0, row_slice.start)
+    col_start = max(0, col_slice.start)
+    row_end = min(out_height, row_start + image.shape[-2])
+    col_end = min(out_width, col_start + image.shape[-1])
+    h = row_end - row_start
+    w = col_end - col_start
+    if h <= 0 or w <= 0:
+        return t_image
+
+    if image.ndim == 3:
+        t_image[:, row_start:row_end, col_start:col_end] = image[:, :h, :w]
+    else:
+        t_image[row_start:row_end, col_start:col_end] = image[:h, :w]
+
+    return t_image
 class AreaPoolLoss(torch.nn.Module):
     def __init__(self, k_size=100, stride=50):
         super().__init__()
@@ -79,7 +146,6 @@ class AWingLoss(torch.nn.Module):
         )
         return lossMat
 
-
 class LossWeightedAWing(torch.nn.Module):
     def __init__(self, W=10, alpha=2.1, omega=14, epsilon=1, theta=0.5):
         super().__init__()
@@ -93,7 +159,6 @@ class LossWeightedAWing(torch.nn.Module):
         weighted_diff = diff * (self.W * M + 1.0)
         loss_value = torch.mean(weighted_diff)
         return loss_value
-
 
 class BandNormalize(K.IntensityAugmentationBase2D):
     """Normalize channels using mean and variance."""
@@ -117,7 +182,6 @@ class BandNormalize(K.IntensityAugmentationBase2D):
         x = (x - flags["means"]) / (flags["stds"] + 1e-10)
         input[..., : self.band_num, :, :] = x
         return input
-
 
 def pad_HW(image, div=32):
     height = image.shape[-2]
@@ -185,41 +249,6 @@ def get_time_bounds(index: index.Index):
     end_date_str = datetime.fromtimestamp(end_date).strftime("%Y-%m-%d")  # %H:%M:%S.%f
     return start_date_str, end_date_str
 
-
-def expand_to_bbox(image: Tensor, bbox: BoundingBox, t_bbox: BoundingBox, res: int):
-    # out_width = round((t_bbox.maxx - t_bbox.minx) / res)
-    # out_height = round((t_bbox.maxy - t_bbox.miny) / res)
-    out_width = math.ceil((t_bbox.maxx - t_bbox.minx) / res)
-    out_height = math.ceil((t_bbox.maxy - t_bbox.miny) / res)
-    if image.shape[-2] == out_height and image.shape[-1] == out_width:
-        # print('not expanded')
-        return image
-    # print(image.ndim)
-    if image.ndim == 3:
-        t_image = torch.zeros([image.shape[0], out_height, out_width])
-    elif image.ndim == 2:
-        t_image = torch.zeros([out_height, out_width])
-    # print('input shape: ', image.shape)
-    # print('target shape: ', t_image.shape)
-    transform = transform_from_bounds(
-        t_bbox.minx, t_bbox.miny, t_bbox.maxx, t_bbox.maxy, out_width, out_height
-    )  # west, south, east, north, width, height
-    bounds = (bbox.minx, bbox.miny, bbox.maxx, bbox.maxy)
-    q_window = win_from_bounds(*bounds, transform)
-    # print(q_window)
-    row_slice, col_slice = window_index(q_window)
-    # row_slice = slice(*row_slice.indices(image.shape[-2])) # to match size
-    # col_slice = slice(*col_slice.indices(image.shape[-1])) # S.indices(len) -> (start, stop, stride)
-    # to ensure matching the size
-    row_slice_2 = slice(row_slice.start, row_slice.start + image.shape[-2])
-    col_slice_2 = slice(col_slice.start, col_slice.start + image.shape[-1])
-    if image.ndim == 3:
-        t_image[:, row_slice_2, col_slice_2] = image
-    elif image.ndim == 2:
-        t_image[row_slice_2, col_slice_2] = image
-    return t_image
-
-
 def plot_imgs(
     images: Iterable, axs: Iterable, chnls: List[int] = [2, 1, 0], bright: float = 3.0
 ):
@@ -230,25 +259,21 @@ def plot_imgs(
         ax.imshow(rgb)
         ax.axis("off")
 
-
 def plot_heatmap(masks: Iterable, axs: Iterable):
     for mask, ax in zip(masks, axs):
         # ax.imshow(mask.squeeze().numpy(), cmap='Blues')
         ax.imshow(mask.numpy(), cmap="jet")
         ax.axis("off")
 
-
 def plot_msks(masks: Iterable, axs: Iterable):
     for mask, ax in zip(masks, axs):
         ax.imshow(mask.numpy(), cmap="gray")
         ax.axis("off")
 
-
 def plot_dem(masks: Iterable, axs: Iterable):
     for mask, ax in zip(masks, axs):
         ax.imshow((mask.numpy() + 2) / 4, cmap="gray")
         ax.axis("off")
-
 
 def plot_batch(
     batch: Dict,
