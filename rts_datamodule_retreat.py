@@ -641,16 +641,30 @@ class LandsatDataModule(pl.LightningDataModule):
         def _rgb(img_chw: torch.Tensor) -> np.ndarray:
             arr = img_chw[rgb_idx,...].detach().cpu().numpy().transpose(1, 2, 0)
             return np.clip(arr * bright, 0, 1)
+        
+        def _get_year(batch, key, i):
+            v = batch.get(key, None)
+            if v is None:
+                return "?"
+            if isinstance(v, (list, tuple)):
+                return v[i] if i < len(v) else v[0]
+            if torch.is_tensor(v):
+                if v.ndim == 1:
+                    return int(v[i].item())
+                return int(v.item())
+            return v
 
         for i in range(N):
+            y_t=_get_year(batch, "year_t", i)
+            y_tm1=_get_year(batch, "year_tm1", i)
             # year t RGB
-            axes[i, 0].imshow(_rgb(img_t[i])); axes[i, 0].set_title("Year t RGB"); axes[i, 0].axis("off")
+            axes[i, 0].imshow(_rgb(img_t[i])); axes[i, 0].set_title(f"Year {y_t} RGB"); axes[i, 0].axis("off")
             # year t heatmap GT
             hm_i = get_vis_ch(heatmap, i)
             axes[i, 1].imshow(np.clip(hm_i, 0, 1.3), cmap="jet", vmin=0, vmax=1.3)
-            axes[i, 1].set_title("Year t Heatmap GT"); axes[i, 1].axis("off")
+            axes[i, 1].set_title(f"Year {y_t} Heatmap GT"); axes[i, 1].axis("off")
             # year t-1 RGB
-            axes[i, 2].imshow(_rgb(img_tm1[i])); axes[i, 2].set_title("Year t-1 RGB"); axes[i, 2].axis("off")
+            axes[i, 2].imshow(_rgb(img_tm1[i])); axes[i, 2].set_title(f"Year {y_tm1} RGB"); axes[i, 2].axis("off")
             # retreat GT
             ret_i = get_vis_ch(retreat, i)
             axes[i, 3].imshow(ret_i, cmap="turbo")

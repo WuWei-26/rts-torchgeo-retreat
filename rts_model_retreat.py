@@ -216,13 +216,9 @@ class SiameseRTS(pl.LightningModule):
 
         dec_out_ch = base_unet.segmentation_head[0].in_channels if isinstance(base_unet.segmentation_head, nn.Sequential) else 16
 
-        # concat(U_t, U_r)
-        self.seg_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
-        self.heat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
-        # retreat: U_r
-        # self.retreat_head = ConvMLPHead(in_ch=dec_out_ch, out_ch=1, mid_ch=64) # FOR PREVIOUS VERSIONS ONLY
-        self.retreat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64)
-
+        self.seg_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64) #2*dec_out_ch
+        self.heat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64) #2*dec_out_ch
+        self.retreat_head = ConvMLPHead(in_ch=2*dec_out_ch, out_ch=1, mid_ch=64) #2*dec_out_ch
         # losses
         self.loss_fn_dice = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
         self.loss_fn_focal = smp.losses.FocalLoss(smp.losses.BINARY_MODE, alpha=0.5, gamma=2)
@@ -242,7 +238,7 @@ class SiameseRTS(pl.LightningModule):
         self.task_weight_heat = nn.Parameter(torch.tensor(2.0), requires_grad=False) # 2.0
         self.task_weight_ret = nn.Parameter(torch.tensor(1.0), requires_grad=False) # 1.0
 
-        self.lr = nn.Parameter(torch.tensor(1e-4), requires_grad=False)
+        self.lr = nn.Parameter(torch.tensor(1e-4), requires_grad=False) # 1e-4 for training, 1e-5 for fine tuning
         self.encode_lr_mult = nn.Parameter(torch.tensor(encode_lr_mult), requires_grad=False)
 
         self._epoch_outputs = {"train": [], "valid": [], "test": []}
@@ -302,20 +298,33 @@ class SiameseRTS(pl.LightningModule):
         feats_t = self.encode(image_t)
         feats_tm1 = self.encode(image_tm1)
         self._ensure_fuser(feats_t)
-        up_t = self.decode_unetpp(self.slump_decoder, feats_t)
 
-        # Retreat path
-        feats_cat = [torch.cat([f_t, f_tm1, (f_t - f_tm1)], dim=1) for f_t, f_tm1 in zip(feats_t, feats_tm1)]
+        feats_cat = [torch.cat([f_t, f_tm1, (f_t - f_tm1)], dim=1) 
+                     for f_t, f_tm1 in zip(feats_t, feats_tm1)]
         fused_feats = self.fuser(feats_cat)
-        up_r = self.decode_unetpp(self.retreat_decoder, fused_feats)
 
+        # seg + heatmap path
+        # up = self.decode_unetpp(self.slump_decoder, fused_feats)
+        # if self.training:
+        #     up = self.dropout(up)
+        # logits_mask = self.seg_head(up)
+        # heatmap     = self.heat_head(up)
+
+        # retreat path, isolated gradient
+        # fused_for_retreat = [f.detach() for f in fused_feats] \
+        #             if not self.training else fused_feats
+        # up_r = self.decode_unetpp(self.retreat_decoder, fused_for_retreat)
+        # retreat_map = self.retreat_head(up_r)
+
+        up_t = self.decode_unetpp(self.slump_decoder, feats_t) # learn year t features
+        up_r = self.decode_unetpp(self.retreat_decoder, fused_feats) # learn difference
         merged = torch.cat([up_t, up_r], dim=1)
 
         if self.training:
             merged = self.dropout(merged)
-
-        logits_mask = self.seg_head(merged)    # [B,1,H,W], from_logits=True
-        heatmap = self.heat_head(merged)   # [B,1,H,W], regression
+        
+        logits_mask=self.seg_head(merged)
+        heatmap=self.heat_head(merged)
         # retreat_map = self.retreat_head(up_r)  # [B,1,H,W], regression # FOR PREVIOUS VERSIONS ONLY
         retreat_map = self.retreat_head(merged)  # [B,1,H,W], regression
 
@@ -381,18 +390,6 @@ class SiameseRTS(pl.LightningModule):
             pred_heat[mask_heat], 
             gt_heatmap[mask_heat], 
             batch["mask"][mask_heat])
-
-        # # foreground loss
-        # loss_heat_fg = self.loss_fn_awing_weighted(
-        #     pred_heat[mask_heat], 
-        #     gt_heatmap[mask_heat], 
-        #     batch["mask"][mask_heat])
-
-        # # background loss
-        # bg_mask = (gt_heatmap ==0) & mask_heat
-        # loss_heat_bg = torch.mean(pred_heat[bg_mask] ** 2)
-
-        # loss_heat = loss_heat_fg + 0.2 * loss_heat_bg # foreground+background
 
         loss_area  = self.loss_fn_area(
             torch.where(mask_heat, pred_heat, torch.zeros_like(pred_heat)),
@@ -665,6 +662,7 @@ class SiameseRTS(pl.LightningModule):
         T_mult=1,
         eta_min=1e-6
         )
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {

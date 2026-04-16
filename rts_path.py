@@ -11,9 +11,17 @@ if host_name == "birkeland":
     mask_dir = base_dir / "heatmap/gt_mask_rts_v3_aea_updated_r4_4_no_gamma_32646"
     polygon_dir = base_dir / "polygons"
 
+# elif host_name == "cryo-A100":
+#     print("Running on cryo-A100")
+#     base_dir = Path("/DATA/DATA1/joey")
+#     img_dir = base_dir / "LANDSAT_LC08_MIX"
+#     dem_dir = base_dir / "NASADEM"
+#     mask_dir = base_dir / "gt_mask_rts_v3_aea_updated_r4_4_no_gamma_32646"
+#     polygon_dir = base_dir / "rts_polygons"
+
 elif host_name == "cryo-A100":
     print("Running on cryo-A100")
-    base_dir = Path("/DATA/DATA1/joey")
+    base_dir = Path("/home/ww/ww_cryostore")
     img_dir = base_dir / "LANDSAT_LC08_MIX"
     dem_dir = base_dir / "NASADEM"
     mask_dir = base_dir / "gt_mask_rts_v3_aea_updated_r4_4_no_gamma_32646"

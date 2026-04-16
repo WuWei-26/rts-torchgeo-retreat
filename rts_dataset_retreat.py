@@ -303,7 +303,8 @@ class Landsat5SR(Landsat8SR):
     # sample: LANDSAT_LC08_C02_T1_L2_LC08_137036_20160810_Cloud_04.tif
     filename_glob = "LANDSAT_LT05_C02_T1_L2_*.tif"
     filename_regex = L5_REGEX
-    date_format = "%Y"  # only acquire year information
+    date_format = "%Y%m%d"
+    # date_format = "%Y"  # only acquire year information
     is_image = True
     # is_dem = False
     separate_files = False
@@ -439,7 +440,8 @@ class RtsMask(Landsat8SR):
 class RetreatMapDataset(RasterDataset):
     # retreat_map_YYYY.tif
     filename_glob = "retreat_map_*.tif"
-    filename_regex = r"^retreat_map_(?P<date>\d{4})\.tif$"
+    # filename_regex = r"^retreat_map_(?P<date>\d{4})\.tif$" # for 1-year window
+    filename_regex = r"^retreat_map_(?P<year_t>\d{4})_(?P<year_tm1>\d{4})\.tif$" # for multi-year window
     date_format = "%Y"
     is_image = False
     separate_files = False
@@ -460,24 +462,36 @@ class RetreatMapDataset(RasterDataset):
     def __getitem__(self, query):
         if isinstance(query, dict):
             bbox = query["bbox"]
-            year = query.get("year", None)
+            # year = query.get("year", None)
+            year_t=query.get("year_t", query.get("year", None))
+            year_tm1=query.get("year_tm1", None)
         elif isinstance(query, BoundingBox):
-            bbox, year = query, None
+            # bbox, year = query, None
+            bbox, year_t, year_tm1 = query, None, None
         else:
             raise TypeError(f"Unsupported query type: {type(query)}")
 
         hits = self.index.intersection(tuple(bbox), objects=True)
         filepaths = [hit.object for hit in hits]
 
-        if year is not None:
-            rgx = re.compile(self.filename_regex, re.VERBOSE)
-            year_str = str(int(year))
-            filepaths = [
-                fp for fp in filepaths
-                if (m := rgx.match(os.path.basename(fp))) and m.group("date") == year_str
-            ]
+        if year_t is not None:
+            rgx = re.compile(self.filename_regex)
+            year_t_str = str(int(year_t))
+            filtered = []
+            for fp in filepaths:
+                m = rgx.match(os.path.basename(fp))
+                if m and m.group("year_t") == year_t_str:
+                    if year_tm1 is None or m.group("year_tm1") == str(int(year_tm1)):
+                        filtered.append(fp)
+            filepaths = filtered
+
+            # filepaths = [
+            #     fp for fp in filepaths
+            #     if (m := rgx.match(os.path.basename(fp))) and m.group("date") == year_str
+            # ]
         if not filepaths:
-            raise IndexError(f"bbox: {bbox} (year={year}) not found in index bounds: {self.bounds}")
+            raise IndexError(f"bbox: {bbox} (year_t={year_t}, year_tm1={year_tm1}) "
+                f"not found in index bounds: {self.bounds}")
         filepath = filepaths[0]
 
         src = self._cached_load_warp_file(filepath) if self.cache else self._load_warp_file(filepath)
@@ -492,7 +506,6 @@ class RetreatMapDataset(RasterDataset):
         # out_height = math.ceil((bbox.maxy - bbox.miny) / self.res)
         out_width = math.ceil((bbox.maxx - bbox.minx) / res_x)
         out_height = math.ceil((bbox.maxy - bbox.miny) / res_y)
-        
         out_shape = (src.count, out_height, out_width)
 
         dest = src.read(out_shape=out_shape, window=from_bounds(*bounds, src.transform))
@@ -668,7 +681,8 @@ class RTSTemporalPairDataset(torch.utils.data.Dataset):
             if self.retreat_ds is not None:
                 try:
                     # q_ret_t = {"bbox": bbox_t, "year": year_t}
-                    s_ret = self.retreat_ds[{"bbox": bbox_t, "year": year_t}]
+                    # s_ret = self.retreat_ds[{"bbox": bbox_t, "year": year_t}]
+                    s_ret = self.retreat_ds[{"bbox": bbox_t, "year_t": year_t, "year_tm1": year_tm1}]
                     if s_ret["mask"].ndim == 3:
                         retreat = s_ret["mask"][:1,...].float()
                     else:

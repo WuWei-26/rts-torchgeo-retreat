@@ -155,20 +155,19 @@ class RandomGeoSamplerMultiRoiMultiYear:
         else:
             rx = ry = abs(float(dataset.res))
         if units == Units.PIXELS:
-            self.size   = (size[0] * ry,   size[1] * rx)     # (H,W)
+            self.size   = (size[0] * ry,   size[1] * rx)
             self.stride = (stride[0] * ry, stride[1] * rx)
         else:
             self.size, self.stride = size, stride
 
         self.index = index.Index(interleaved=False, properties=index.Property(dimension=3))
 
-        # year -> roi_idx -> chips
-        self.year_roi_chips: Dict[int, List[List[BoundingBox]]] = {}  # year -> [roi0_chips, roi1_chips, ...]
-        self.year_roi_weights: Dict[int, torch.Tensor] = {}           # year -> [w0, w1, ...]
+        # (year_t, year_tm1) -> roi_idx -> chips
+        self.year_roi_chips: Dict[Tuple[int,int], List[List[BoundingBox]]] = {}
+        self.year_roi_weights: Dict[Tuple[int,int], torch.Tensor] = {}
         self.year_lengths: List[int] = []
-        self.year_bboxs: Dict[int, List[BoundingBox]] = {}
-        self.year_areas: Dict[int, torch.Tensor] = {}
-        # self.year_lengths: List[int] = []
+        self.year_bboxs: Dict[Tuple[int,int], List[BoundingBox]] = {}
+        self.year_areas: Dict[Tuple[int,int], torch.Tensor] = {}
 
         def year_bbox(b: BoundingBox, y: int) -> BoundingBox:
             mint = datetime(y, 1, 1).timestamp()
@@ -190,19 +189,20 @@ class RandomGeoSamplerMultiRoiMultiYear:
                 y += self.stride[0]
             return chips
 
-        for y, roi_entry in zip(self.year_dict["year"], self.year_dict["roi"]):
-            y = int(y)
-            ym1 = y - self.prev_delta
+        for y, ym1, roi_entry in zip(self.year_dict["year"], self.year_dict["year_tm1"], self.year_dict["roi"]):
+            y   = int(y)
+            ym1 = int(ym1)
+            pair_key = (y, ym1)  # ← tuple key，避免同一 year_t 多配对互相覆盖
 
-            self.year_bboxs[y] = []
+            self.year_bboxs[pair_key] = []
 
             roi_chips_list: List[List[BoundingBox]] = []
             roi_weights_list: List[float] = []
-            all_chips_flat: List[BoundingBox] = []
             all_areas_flat: List[float] = []
 
             for roi, roi_w in zip(roi_entry["roi"], roi_entry["weight"]):
                 qb_t = year_bbox(roi, y)
+
                 chips_this_roi: List[BoundingBox] = []
                 areas_this_roi: List[float] = []
 
@@ -213,8 +213,8 @@ class RandomGeoSamplerMultiRoiMultiYear:
                                                 datetime(ym1, 1, 1).timestamp(),
                                                 datetime(ym1+1, 1, 1).timestamp())
                         hits_tm1 = list(self.dataset.index.intersection(tuple(ch_as_tm1), objects=False))
-                        if hits_tm1:
-                            self.year_bboxs[y].append(ch)
+                        if True:
+                            self.year_bboxs[pair_key].append(ch)
                             areas_this_roi.append(max(ch.area, 1e-9) * float(roi_w))
                             chips_this_roi.append(ch)
 
@@ -222,46 +222,40 @@ class RandomGeoSamplerMultiRoiMultiYear:
                 roi_weights_list.append(float(roi_w) if chips_this_roi else 0.0)
                 all_areas_flat.extend(areas_this_roi)
 
-            self.year_roi_chips[y] = roi_chips_list
+            self.year_roi_chips[pair_key] = roi_chips_list
             rw = torch.tensor(roi_weights_list, dtype=torch.float)
             if float(rw.sum()) == 0:
-                rw = torch.ones_like(rw)  # fallback
-            self.year_roi_weights[y] = rw / rw.sum()
+                rw = torch.ones_like(rw)
+            self.year_roi_weights[pair_key] = rw / rw.sum()
 
-            # self.year_bboxs[y] = chips_t
             prob = torch.tensor(all_areas_flat, dtype=torch.float)
             if prob.numel() > 0 and float(prob.sum()) == 0:
                 prob = torch.ones_like(prob)
-            self.year_areas[y] = prob
-            self.year_lengths.append(len(self.year_bboxs[y]))
-            print(f"[Sampler] year={y}: {len(self.year_bboxs[y])} valid chips (tm1={ym1} verified)")
-            # self.year_bboxs[y] = all_chips_flat
-            # self.year_areas[y] = torch.ones(len(all_chips_flat), dtype=torch.float)
-            # self.year_lengths.append(len(all_chips_flat))
-
-            # print(f"[Sampler] year={y}: {len(all_chips_flat)} chips across {len(roi_chips_list)} ROIs")
+            self.year_areas[pair_key] = prob
+            self.year_lengths.append(len(self.year_bboxs[pair_key]))
+            print(f"[Sampler] year={y} tm1={ym1}: {len(self.year_bboxs[pair_key])} valid chips")
             for ri, (chips, w) in enumerate(zip(roi_chips_list, roi_weights_list)):
                 cid = roi_entry.get("cluster_id", list(range(len(roi_chips_list))))[ri]
-                print(f"ROI {ri} (cluster={cid}): {len(chips)} chips, weight={w:.4f}")
+                print(f"  ROI {ri} (cluster={cid}): {len(chips)} chips, weight={w:.4f}")
 
         if length is not None:
             self.length = int(length)
         else:
-            self.length = sum(len(self.year_bboxs.get(int(y), [])) for y in self.year_dict["year"])
+            self.length = sum(len(v) for v in self.year_bboxs.values())
         if self.length <= 0:
             raise RuntimeError("No tiles found. Check year_dict and ROI coverage.")
 
-        self.active_years = []
-        self.active_weights = []
-        for y, w in zip(self.year_dict["year"], self.year_dict["weight"]):
-            y = int(y) 
-            # ym1 = y - self.prev_delta
-            ok = len(self.year_bboxs.get(y, [])) > 0 and self.year_areas.get(y, torch.tensor([])).numel() > 0 and float(self.year_areas[y].sum()) > 0
+        self.active_years: List[Tuple[int,int]] = []
+        self.active_weights: List[float] = []
+        for y, ym1, w in zip(self.year_dict["year"], self.year_dict["year_tm1"], self.year_dict["weight"]):
+            y, ym1 = int(y), int(ym1)
+            pair_key = (y, ym1)
+            ok = (len(self.year_bboxs.get(pair_key, [])) > 0
+                  and self.year_areas.get(pair_key, torch.tensor([])).numel() > 0
+                  and float(self.year_areas[pair_key].sum()) > 0)
             if ok:
-                self.active_years.append(y)
+                self.active_years.append(pair_key)
                 self.active_weights.append(float(w))
-        # if len(self.active_years) == 0:
-        #     raise RuntimeError("No active years with valid (t,t-1) chips. Verify chip building for t and t-1.")
 
         yw = torch.tensor(self.active_weights, dtype=torch.float)
         if float(yw.sum()) == 0:
@@ -274,11 +268,11 @@ class RandomGeoSamplerMultiRoiMultiYear:
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         for _ in range(self.length):
             yi = torch.multinomial(self.year_weights_tensor, 1, replacement=True).item()
-            year_t = self.active_years[yi]
-            year_tm1 = year_t - self.prev_delta
+            year_t, year_tm1 = self.active_years[yi]
+            pair_key = (year_t, year_tm1)
 
-            roi_weights = self.year_roi_weights[year_t]
-            roi_chips_list = self.year_roi_chips[year_t]
+            roi_weights   = self.year_roi_weights[pair_key]
+            roi_chips_list = self.year_roi_chips[pair_key]
 
             valid_roi_idx = [i for i, chips in enumerate(roi_chips_list) if len(chips) > 0]
             if not valid_roi_idx:
