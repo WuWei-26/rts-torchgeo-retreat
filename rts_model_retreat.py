@@ -558,6 +558,11 @@ class SiameseRTS(pl.LightningModule):
         image_tm1 = batch["image_tm1"]
         dem_t = batch.get("dem_t", None)
         dem_tm1 = batch.get("dem_tm1", None)
+
+        image_t_orig = image_t
+        image_tm1_orig = image_tm1
+        dem_t_orig = dem_t
+        dem_tm1_orig = dem_tm1
     
         # DEBUG
         # print(f"Input shapes: image_t={image_t.shape}, image_tm1={image_tm1.shape}")
@@ -579,6 +584,8 @@ class SiameseRTS(pl.LightningModule):
         with torch.no_grad():
             outputs = self.forward(image_t, image_tm1, dem_t, dem_tm1)
             logits_mask = outputs["logits_mask"]
+            heatmap = outputs["heatmap"]
+            retreat = outputs["retreat"]* self.retreat_scale
 
             if pad_h > 0 or pad_w > 0:
                 logits_mask = logits_mask[:, :, :h, :w]
@@ -586,20 +593,52 @@ class SiameseRTS(pl.LightningModule):
                 outputs["retreat"] = outputs["retreat"][:, :, :h, :w]
                 
             # pred_heat = outputs["heatmap"]
-            heatmap = outputs["heatmap"]
+            # heatmap = outputs["heatmap"]
             # pred_retreat = outputs["retreat"] * self.retreat_scale
-            retreat = outputs["retreat"] * self.retreat_scale
+            # retreat = outputs["retreat"] * self.retreat_scale
             prob_mask = logits_mask.sigmoid()
 
-        return {
-            "image_t": image_t.detach().cpu(),
-            "image_tm1": image_tm1.detach().cpu(),
+        valid_t = (image_t_orig != 0).any(dim=1, keepdim=True)
+        valid_tm1 = (image_tm1_orig != 0).any(dim=1, keepdim=True)
+        valid_both = valid_t & valid_tm1
+
+        bbox = batch["bbox"]
+        if isinstance(bbox, (list, tuple)) and len(bbox) > 0 and hasattr(bbox[0], "minx"):
+            bbox_obj = bbox[0]
+        else:
+            bbox_obj = bbox
+        
+        bbox_serializable = (
+            float(bbox_obj.minx),
+            float(bbox_obj.maxx),
+            float(bbox_obj.miny),
+            float(bbox_obj.maxy),
+            float(bbox_obj.mint),
+            float(bbox_obj.maxt),
+        )
+
+        result = {
+            "image_t": image_t_orig.detach().cpu(),
+            "image_tm1": image_tm1_orig.detach().cpu(),
             # "pred_retreat": pred_retreat.detach().cpu(),
             # "pred_heat": pred_heat.detach().cpu(),
-            "retreat":   retreat.detach().cpu(),
+            "retreat": retreat.detach().cpu(),
             "heatmap": heatmap.detach().cpu(),
             "prob_mask": prob_mask.detach().cpu(),
+            "valid_t": valid_t.detach().cpu(),
+            "valid_tm1": valid_tm1.detach().cpu(),
+            "valid_both": valid_both.detach().cpu(),
+            'bbox': bbox_serializable,
         }
+
+        if "crs" in batch:
+            result["crs"] = batch["crs"]
+        if "path_t" in batch:
+            result["path_t"] = batch["path_t"]
+        if "path_tm1" in batch:
+            result["path_tm1"] = batch["path_tm1"]
+        
+        return result
 
     def _aggregate_and_print_epoch(self, stage: str):
         # outputs = self._epoch_outputs[stage]

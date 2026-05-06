@@ -770,10 +770,19 @@ class LandsatPairInferenceDataModule(pl.LightningDataModule):
             }
         }
         year_dict = {"year": [self.year_t], "weight": [1.0], "roi": [roi_dict[str(self.year_t)]]}
+        # self.predict_sampler = TestPreChippedGeoSampler(
+        #     self.dataset, 
+        #     min_size=32 * 2, 
+        #     roi=self.roi, 
+        #     units=Units.PIXELS,
+        #     year_t=year_t,
+        #     year_tm1=year_tm1,
+        # )
         self.predict_sampler = TestPreChippedGeoSampler(
-            self.dataset, 
-            min_size=32 * 2, 
-            roi=self.roi, 
+            self.dataset,
+            size=self.patch_size,
+            stride=self.patch_size,   # 先不重叠；后面可改成 self.patch_size // 2
+            roi=self.roi,
             units=Units.PIXELS,
             year_t=year_t,
             year_tm1=year_tm1,

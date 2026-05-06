@@ -290,85 +290,172 @@ class RandomGeoSamplerMultiRoiMultiYear:
             yield {"bbox": bbox, "year_t": year_t, "year_tm1": year_tm1}
 
 class TestPreChippedGeoSampler(GeoSampler):
-    """Samples entire files at a time.
-
-    This is particularly useful for datasets that contain geospatial metadata
-    and subclass :class:`~torchgeo.datasets.GeoDataset` but have already been
-    pre-processed into :term:`chips <chip>`.
-
-    This sampler should not be used with :class:`~torchgeo.datasets.NonGeoDataset`.
-    You may encounter problems when using an :term:`ROI <region of interest (ROI)>`
-    that partially intersects with one of the file bounding boxes, when using an
-    :class:`~torchgeo.datasets.IntersectionDataset`, or when each file is in a
-    different CRS. These issues can be solved by adding padding.
+    """
+    Sample fixed-size patches from each hit instead of returning whole files.
     """
 
     def __init__(
         self,
         dataset: GeoDataset,
-        min_size: Union[Tuple[float, float], float],
+        size: Union[Tuple[float, float], float],
+        stride: Optional[Union[Tuple[float, float], float]] = None,
         roi: Optional[BoundingBox] = None,
         shuffle: bool = False,
         units: Units = Units.PIXELS,
         year_t: Optional[int] = None,
-        year_tm1: Optional[int] = None
+        year_tm1: Optional[int] = None,
     ) -> None:
-        """Initialize a new Sampler instance.
-
-        .. versionadded:: 0.3
-
-        Args:
-            dataset: dataset to index from
-            roi: region of interest to sample from (minx, maxx, miny, maxy, mint, maxt)
-                (defaults to the bounds of ``dataset.index``)
-            shuffle: if True, reshuffle data at every epoch
-        """
         super().__init__(dataset, roi)
-        self.shuffle = shuffle
 
+        self.shuffle = shuffle
         self.year_t = year_t
         self.year_tm1 = year_tm1
 
-        # self.min_size = min_size
-        self.min_size = _to_tuple(min_size)
+        self.size = _to_tuple(size)
+        if stride is None:
+            stride = size
+        self.stride = _to_tuple(stride)
 
         if units == Units.PIXELS:
-            self.min_size = (self.min_size[0] * self.res[1] , self.min_size[1] * self.res[0])
+            # convert from pixels to CRS units
+            self.size = (self.size[0] * self.res[1], self.size[1] * self.res[0])
+            self.stride = (self.stride[0] * self.res[1], self.stride[1] * self.res[0])
 
-        self.hits = []
+        # IMPORTANT: always create this
+        self.queries = []
+
         for hit in self.index.intersection(tuple(self.roi), objects=True):
-            bounds = BoundingBox(*hit.bounds)  # type: ignore # no & roi
-            if (
-                bounds.maxx - bounds.minx >= self.min_size[1]
-                and bounds.maxy - bounds.miny >= self.min_size[0]
-            ):
-                # self.length += 1
-                self.hits.append(hit)
+            bounds = BoundingBox(*hit.bounds)
+
+            file_minx = max(bounds.minx, self.roi.minx)
+            file_maxx = min(bounds.maxx, self.roi.maxx)
+            file_miny = max(bounds.miny, self.roi.miny)
+            file_maxy = min(bounds.maxy, self.roi.maxy)
+
+            width = file_maxx - file_minx
+            height = file_maxy - file_miny
+
+            # skip files smaller than one patch
+            if width < self.size[1] or height < self.size[0]:
+                continue
+
+            y_top = file_maxy
+            while y_top - self.size[0] >= file_miny:
+                x_left = file_minx
+                while x_left + self.size[1] <= file_maxx:
+                    patch_bbox = BoundingBox(
+                        x_left,
+                        x_left + self.size[1],
+                        y_top - self.size[0],
+                        y_top,
+                        bounds.mint,
+                        bounds.maxt,
+                    )
+
+                    self.queries.append({
+                        "bbox": patch_bbox,
+                        "path": cast(str, hit.object),
+                        "year_t": self.year_t,
+                        "year_tm1": self.year_tm1,
+                    })
+
+                    x_left += self.stride[1]
+                y_top -= self.stride[0]
+
+        print(f"[TestPreChippedGeoSampler] total queries: {len(self.queries)}")
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
-        """Return the index of a dataset.
-
-        Returns:
-            (minx, maxx, miny, maxy, mint, maxt) coordinates to index a dataset
-            and the exact single file filepath
-        """
-        generator: Callable[[int], Iterable[int]] = range
         if self.shuffle:
-            generator = torch.randperm # type: ignore
+            indices = torch.randperm(len(self.queries)).tolist()
+        else:
+            indices = range(len(self.queries))
 
-        for idx in generator(len(self)):
-            query = {
-                "bbox": BoundingBox(*self.hits[idx].bounds),
-                "path": cast(str, self.hits[idx].object),
-                "year_t": self.year_t,
-                "year_tm1": self.year_tm1
-            }
-            yield query
+        for idx in indices:
+            yield self.queries[idx]
 
     def __len__(self) -> int:
-        """Return the number of samples over the ROI.
+        return len(self.queries)
 
-        Returns:
-            number of patches that will be sampled
-        """
-        return len(self.hits)
+# class TestPreChippedGeoSampler(GeoSampler):
+#     """Samples entire files at a time.
+
+#     This is particularly useful for datasets that contain geospatial metadata
+#     and subclass :class:`~torchgeo.datasets.GeoDataset` but have already been
+#     pre-processed into :term:`chips <chip>`.
+
+#     This sampler should not be used with :class:`~torchgeo.datasets.NonGeoDataset`.
+#     You may encounter problems when using an :term:`ROI <region of interest (ROI)>`
+#     that partially intersects with one of the file bounding boxes, when using an
+#     :class:`~torchgeo.datasets.IntersectionDataset`, or when each file is in a
+#     different CRS. These issues can be solved by adding padding.
+#     """
+
+#     def __init__(
+#         self,
+#         dataset: GeoDataset,
+#         min_size: Union[Tuple[float, float], float],
+#         roi: Optional[BoundingBox] = None,
+#         shuffle: bool = False,
+#         units: Units = Units.PIXELS,
+#         year_t: Optional[int] = None,
+#         year_tm1: Optional[int] = None
+#     ) -> None:
+#         """Initialize a new Sampler instance.
+
+#         .. versionadded:: 0.3
+
+#         Args:
+#             dataset: dataset to index from
+#             roi: region of interest to sample from (minx, maxx, miny, maxy, mint, maxt)
+#                 (defaults to the bounds of ``dataset.index``)
+#             shuffle: if True, reshuffle data at every epoch
+#         """
+#         super().__init__(dataset, roi)
+#         self.shuffle = shuffle
+
+#         self.year_t = year_t
+#         self.year_tm1 = year_tm1
+
+#         # self.min_size = min_size
+#         self.min_size = _to_tuple(min_size)
+
+#         if units == Units.PIXELS:
+#             self.min_size = (self.min_size[0] * self.res[1] , self.min_size[1] * self.res[0])
+
+#         self.hits = []
+#         for hit in self.index.intersection(tuple(self.roi), objects=True):
+#             bounds = BoundingBox(*hit.bounds)  # type: ignore # no & roi
+#             if (
+#                 bounds.maxx - bounds.minx >= self.min_size[1]
+#                 and bounds.maxy - bounds.miny >= self.min_size[0]
+#             ):
+#                 # self.length += 1
+#                 self.hits.append(hit)
+
+#     def __iter__(self) -> Iterator[Dict[str, Any]]:
+#         """Return the index of a dataset.
+
+#         Returns:
+#             (minx, maxx, miny, maxy, mint, maxt) coordinates to index a dataset
+#             and the exact single file filepath
+#         """
+#         generator: Callable[[int], Iterable[int]] = range
+#         if self.shuffle:
+#             generator = torch.randperm # type: ignore
+
+#         for idx in generator(len(self)):
+#             query = {
+#                 "bbox": BoundingBox(*self.hits[idx].bounds),
+#                 "path": cast(str, self.hits[idx].object),
+#                 "year_t": self.year_t,
+#                 "year_tm1": self.year_tm1
+#             }
+#             yield query
+
+#     def __len__(self) -> int:
+#         """Return the number of samples over the ROI.
+
+#         Returns:
+#             number of patches that will be sampled
+#         """
+#         return len(self.hits)
